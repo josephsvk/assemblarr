@@ -1,0 +1,12 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+postgres
+assemblarr_library
+download_workspace
+.codex
+.agents
+.env
