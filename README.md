@@ -72,6 +72,7 @@ docker compose -f "docker compose.yml" up -d
 Container safety defaults:
 
 - runs as a non-root `assemblarr` user
+- can be mapped to your host user with `PUID` and `PGID` for writable bind mounts
 - drops Linux capabilities and enables `no-new-privileges`
 - keeps the container filesystem read-only except for `/tmp`
 - mounts movie, series, and download libraries read-only
@@ -89,6 +90,29 @@ docker compose -f "docker compose.yml" run --rm assemblarr python scripts/sync_l
 ```
 
 The `POSTGRES_DSN` inside Docker is overridden to use the `postgres` service hostname automatically, so `.env` can keep the localhost DSN for local non-container runs.
+
+If `ASSEMBLARR_LIBRARY_ROOT` is a host bind mount, create it before the first `--apply` run and ensure it is writable by the UID/GID used by the container:
+
+```bash
+sudo mkdir -p /mnt/MediaPool/assemblarr/assemblarr_library
+sudo chown -R 1000:1000 /mnt/MediaPool/assemblarr
+sudo chmod -R u+rwX,g+rwX /mnt/MediaPool/assemblarr
+```
+
+Adjust `1000:1000` to the values used in `.env` for `PUID` and `PGID`.
+
+## Planned Background Mode
+
+For now, Assemblarr is tested by manually running individual scripts.
+
+The long-running container is intended to stay alive in the background and later:
+
+- wait for explicit operator-triggered script runs
+- watch the managed workspace for newly staged artifacts
+- eventually watch selected library/workspace paths for new files and trigger the next safe workflow step
+- keep all mutating actions gated behind explicit logic, not implicit `--apply` on startup
+
+This background behavior is documentation only for now and is not enabled yet.
 
 Initialize and sync:
 

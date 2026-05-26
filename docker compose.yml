@@ -27,6 +27,7 @@ services:
       context: .
     container_name: assemblarr
     restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
     depends_on:
       postgres:
         condition: service_healthy
