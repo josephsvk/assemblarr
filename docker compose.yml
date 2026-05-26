@@ -1,0 +1,12 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: assemblarr-postgres
+    environment:
+      POSTGRES_DB: assemblarr
+      POSTGRES_USER: assemblarr
+      POSTGRES_PASSWORD: change_me
+    volumes:
+      - ./postgres:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"

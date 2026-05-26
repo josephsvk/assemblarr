@@ -1,0 +1,188 @@
+database:
+  dsn_env: POSTGRES_DSN
+
+library:
+  source_priority:
+    - radarr
+    - sonarr
+  paths:
+    movies_root_env: MOVIES_LIBRARY_ROOT
+    series_root_env: SERIES_LIBRARY_ROOT
+    download_root_env: DOWNLOAD_ROOT
+
+library_checks:
+  missing_language:
+    sources:
+      - radarr
+      - sonarr
+    media_types:
+      radarr: movie_file
+      sonarr: episode_file
+    limit: 1
+    filename_only: true
+    required_any_tokens:
+      - CZ
+      - CS
+      - SK
+      - CZECH
+      - SLOVAK
+
+prowlarr_search:
+  base_url_env: PROWLARR_URL
+  api_key_env: PROWLARR_API_KEY
+  type: movie
+  limit: 50
+  categories:
+    - 2000
+  language:
+    required_any_tokens:
+      - CZ
+      - CS
+      - SK
+      - CZECH
+      - SLOVAK
+    score:
+      CZECH: 1200
+      SLOVAK: 1200
+      CZ: 1000
+      CS: 1000
+      SK: 1000
+  scoring:
+    seeders_multiplier: 2
+    audio:
+      TrueHD Atmos: 180
+      DTS-X: 175
+      TrueHD: 165
+      DTS-HD MA: 155
+      EAC3 Atmos: 145
+      EAC3: 120
+      DTS: 95
+      AC3: 85
+      AAC: 45
+      MP3: 10
+    video:
+      2160p: 140
+      1080p: 100
+      720p: 40
+    source:
+      Bluray: 120
+      WEB-DL: 95
+      WEBDL: 95
+      WEBRip: 70
+      HDTV: 30
+    reject_tokens:
+      - CAM
+      - TS
+      - Telesync
+      - HDCAM
+      - HDTS
+
+tagging:
+  apply_to_arr: true
+  apply_to_database: true
+  missing_language_tag:
+    label: nodab
+    reason: no configured CZ/SK dubbing found
+  detected_language_tags:
+    cz:
+      label: cz
+      tokens:
+        - CZ
+        - CS
+        - CZECH
+    sk:
+      label: sk
+      tokens:
+        - SK
+        - SLOVAK
+  arr:
+    radarr:
+      base_url_env: RADARR_URL
+      api_key_env: RADARR_API_KEY
+      item_type: movie
+      item_path: /api/v3/movie/{id}
+      tag_path: /api/v3/tag
+    sonarr:
+      base_url_env: SONARR_URL
+      api_key_env: SONARR_API_KEY
+      item_type: series
+      item_path: /api/v3/series/{id}
+      tag_path: /api/v3/tag
+
+subtitle_scan:
+  apply_to_database: true
+  apply_to_arr: false
+  check_embedded: true
+  source_priority:
+    - radarr
+    - sonarr
+  media_types:
+    radarr: movie_file
+    sonarr: episode_file
+  filename_only: true
+  sidecar_extensions:
+    - .srt
+    - .ass
+    - .ssa
+    - .vtt
+    - .sub
+  no_subtitle_tag:
+    label: no-tit
+    reason: no configured subtitle language found
+  languages:
+    cz:
+      label: cz-tit
+      tokens:
+        - cz
+        - cs
+        - cze
+        - ces
+        - czech
+    sk:
+      label: sk-tit
+      tokens:
+        - sk
+        - svk
+        - slo
+        - slovak
+    en:
+      label: en-tit
+      tokens:
+        - en
+        - eng
+        - english
+
+assemblarr_library:
+  root_env: ASSEMBLARR_LIBRARY_ROOT
+  root: /home/joseph/assemblarr/assemblarr_library
+  folders:
+    incoming: incoming
+    processing: processing
+    library: library
+    archive: archive
+    failed: failed
+  min_free_gb: 100
+  max_candidate_size_gb: 200
+  filename_prefix: assemblarr
+  transfer_policy:
+    keep_original_artifact: true
+    require_manual_import: true
+    delete_download_after_import: false
+
+download_workspace:
+  use_library: true
+
+download_clients:
+  enabled: false
+  preferred: qbittorrent
+  qbittorrent:
+    url_env: QBITTORRENT_URL
+    username_env: QBITTORRENT_USERNAME
+    password_env: QBITTORRENT_PASSWORD
+    category: assemblarr
+    save_path: /home/joseph/assemblarr/assemblarr_library/incoming
+  sabnzbd:
+    url_env: SABNZBD_URL
+    api_key_env: SABNZBD_API_KEY
+    category: assemblarr
+    dir: /home/joseph/assemblarr/assemblarr_library/incoming

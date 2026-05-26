@@ -1,0 +1,35 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local runtime data
+postgres/
+assemblarr_library/
+download_workspace/
+
+# Download artifacts and media workspace files
+*.torrent
+*.nzb
+*.magnet
+*.part
+*.tmp
+
+# Local Codex/runtime scratch
+.codex/
+.agents/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
