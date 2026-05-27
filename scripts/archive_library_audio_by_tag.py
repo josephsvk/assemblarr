@@ -225,6 +225,57 @@ def upsert_backup(
     )
 
 
+def persist_backup_with_retry(
+    dsn: str,
+    *,
+    row: dict[str, Any],
+    tag_label: str,
+    library_video_path: str,
+    output_root: str,
+    extraction_status: str,
+    extracted_tracks: list[dict[str, Any]],
+    probe_streams: list[dict[str, Any]],
+    metadata: dict[str, Any],
+) -> None:
+    with connect_postgres(dsn) as conn:
+        conn.row_factory = dict_row
+        ensure_schema(conn)
+        upsert_backup(
+            conn,
+            row=row,
+            tag_label=tag_label,
+            library_video_path=library_video_path,
+            output_root=output_root,
+            extraction_status=extraction_status,
+            extracted_tracks=extracted_tracks,
+            probe_streams=probe_streams,
+            metadata=metadata,
+        )
+        conn.commit()
+
+
+def build_source_metadata(
+    *,
+    config: dict[str, Any],
+    library_video_path: Path,
+    audio_stream_count: int,
+    extra_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata = {
+        "selected_languages": sorted(preferred_languages(config)),
+        "audio_stream_count": audio_stream_count,
+        "library_video_path": str(library_video_path),
+        "managed_by": "archive_library_audio_by_tag",
+    }
+    if library_video_path.exists():
+        source_stat = library_video_path.stat()
+        metadata["source_size_bytes"] = source_stat.st_size
+        metadata["source_mtime_epoch"] = int(source_stat.st_mtime)
+    if extra_metadata:
+        metadata.update(extra_metadata)
+    return metadata
+
+
 def find_candidates(conn: Any, source: str, tag_label: str, movie_id: int | None, limit: int | None) -> list[dict[str, Any]]:
     params: dict[str, Any] = {"source": source, "tag_label": tag_label}
     clauses = [
@@ -288,8 +339,9 @@ def main() -> int:
     source = str(settings.get("source", "radarr"))
     tag_label = str(args.tag or settings.get("default_tag", "2160p"))
     limit = args.limit if args.limit is not None else (None if args.batch else 1)
+    dsn = required_env(str(config.get("database", {}).get("dsn_env", "POSTGRES_DSN")))
 
-    with connect_postgres(required_env(str(config.get("database", {}).get("dsn_env", "POSTGRES_DSN")))) as conn:
+    with connect_postgres(dsn) as conn:
         conn.row_factory = dict_row
         ensure_schema(conn)
         rows = find_candidates(conn, source, tag_label, args.movie_id, limit)
@@ -297,76 +349,69 @@ def main() -> int:
             print("No tagged library audio-backup candidates found.")
             conn.commit()
             return 0
+        conn.commit()
 
-        results: list[dict[str, Any]] = []
-        for row in rows:
-            library_video_path = Path(str(row["library_video_path"]))
-            if not library_video_path.exists():
-                results.append(
-                    {
-                        "title": row["title"],
-                        "year": row["year"],
-                        "movie_id": int(row["movie_id"]),
-                        "file_source_id": int(row["file_source_id"]),
-                        "tag": row["tag_label"],
-                        "library_video_path": str(library_video_path),
-                        "output_root": None,
-                        "status": "missing_library_file",
-                        "track_count": 0,
-                    }
-                )
-                continue
-
-            destination_root = archive_root(config, tag_label, int(row["movie_id"]), str(row["title"]), row["year"])
-            if settings.get("keep_existing", True) and existing_backup_is_valid(row, library_video_path):
-                extracted_tracks = list(row.get("existing_extracted_tracks") or [])
-                results.append(
-                    {
-                        "title": row["title"],
-                        "year": row["year"],
-                        "movie_id": int(row["movie_id"]),
-                        "file_source_id": int(row["file_source_id"]),
-                        "tag": row["tag_label"],
-                        "library_video_path": str(library_video_path),
-                        "output_root": str(destination_root),
-                        "status": "already_archived",
-                        "track_count": len(extracted_tracks),
-                    }
-                )
-                continue
-
-            streams = ffprobe_streams(library_video_path)
-            audio_streams = [stream for stream in streams if str(stream.get("codec_type") or "") == "audio"]
-            preview_languages = [detect_stream_language(stream, config) for stream in audio_streams]
-            extraction_status = "pending_backup"
-            extracted_tracks: list[dict[str, Any]] = []
-            metadata = {
-                "selected_languages": sorted(preferred_languages(config)),
-                "audio_stream_count": len(audio_streams),
-            }
-
+    results: list[dict[str, Any]] = []
+    total_rows = len(rows)
+    for index, row in enumerate(rows, start=1):
+        library_video_path = Path(str(row["library_video_path"]))
+        if not library_video_path.exists():
             if args.apply:
-                extraction_status, extracted_tracks, streams, extra_metadata = extract_audio_streams(library_video_path, destination_root, config)
-                source_stat = library_video_path.stat()
-                metadata = {
-                    **extra_metadata,
+                persist_backup_with_retry(
+                    dsn,
+                    row=row,
+                    tag_label=tag_label,
+                    library_video_path=str(library_video_path),
+                    output_root="",
+                    extraction_status="missing_library_file",
+                    extracted_tracks=[],
+                    probe_streams=[],
+                    metadata={
+                        "selected_languages": sorted(preferred_languages(config)),
+                        "library_video_path": str(library_video_path),
+                        "managed_by": "archive_library_audio_by_tag",
+                    },
+                )
+            results.append(
+                {
+                    "title": row["title"],
+                    "year": row["year"],
+                    "movie_id": int(row["movie_id"]),
+                    "file_source_id": int(row["file_source_id"]),
+                    "tag": row["tag_label"],
                     "library_video_path": str(library_video_path),
-                    "source_size_bytes": source_stat.st_size,
-                    "source_mtime_epoch": int(source_stat.st_mtime),
-                    "managed_by": "archive_library_audio_by_tag",
+                    "output_root": None,
+                    "status": "missing_library_file",
+                    "track_count": 0,
                 }
-                upsert_backup(
-                    conn,
+            )
+            print(
+                f"progress: {index}/{total_rows} status=missing_library_file "
+                f"remaining={total_rows - index} title={row['title']}"
+            )
+            continue
+
+        destination_root = archive_root(config, tag_label, int(row["movie_id"]), str(row["title"]), row["year"])
+        if settings.get("keep_existing", True) and existing_backup_is_valid(row, library_video_path):
+            extracted_tracks = list(row.get("existing_extracted_tracks") or [])
+            if args.apply:
+                metadata = build_source_metadata(
+                    config=config,
+                    library_video_path=library_video_path,
+                    audio_stream_count=len(extracted_tracks),
+                    extra_metadata={"kept_existing_backup": True},
+                )
+                persist_backup_with_retry(
+                    dsn,
                     row=row,
                     tag_label=tag_label,
                     library_video_path=str(library_video_path),
                     output_root=str(destination_root),
-                    extraction_status=extraction_status,
+                    extraction_status="already_archived",
                     extracted_tracks=extracted_tracks,
-                    probe_streams=streams,
+                    probe_streams=[],
                     metadata=metadata,
                 )
-
             results.append(
                 {
                     "title": row["title"],
@@ -376,14 +421,65 @@ def main() -> int:
                     "tag": row["tag_label"],
                     "library_video_path": str(library_video_path),
                     "output_root": str(destination_root),
-                    "status": extraction_status,
-                    "track_count": len(extracted_tracks) if args.apply else len(audio_streams),
-                    "preview_languages": preview_languages,
+                    "status": "already_archived",
+                    "track_count": len(extracted_tracks),
                 }
             )
+            print(
+                f"progress: {index}/{total_rows} status=already_archived "
+                f"remaining={total_rows - index} title={row['title']}"
+            )
+            continue
+
+        streams = ffprobe_streams(library_video_path)
+        audio_streams = [stream for stream in streams if str(stream.get("codec_type") or "") == "audio"]
+        preview_languages = [detect_stream_language(stream, config) for stream in audio_streams]
+        extraction_status = "pending_backup"
+        extracted_tracks: list[dict[str, Any]] = []
+        metadata = build_source_metadata(
+            config=config,
+            library_video_path=library_video_path,
+            audio_stream_count=len(audio_streams),
+        )
 
         if args.apply:
-            conn.commit()
+            extraction_status, extracted_tracks, streams, extra_metadata = extract_audio_streams(library_video_path, destination_root, config)
+            metadata = build_source_metadata(
+                config=config,
+                library_video_path=library_video_path,
+                audio_stream_count=len(audio_streams),
+                extra_metadata=extra_metadata,
+            )
+            persist_backup_with_retry(
+                dsn,
+                row=row,
+                tag_label=tag_label,
+                library_video_path=str(library_video_path),
+                output_root=str(destination_root),
+                extraction_status=extraction_status,
+                extracted_tracks=extracted_tracks,
+                probe_streams=streams,
+                metadata=metadata,
+            )
+
+        results.append(
+            {
+                "title": row["title"],
+                "year": row["year"],
+                "movie_id": int(row["movie_id"]),
+                "file_source_id": int(row["file_source_id"]),
+                "tag": row["tag_label"],
+                "library_video_path": str(library_video_path),
+                "output_root": str(destination_root),
+                "status": extraction_status,
+                "track_count": len(extracted_tracks) if args.apply else len(audio_streams),
+                "preview_languages": preview_languages,
+            }
+        )
+        print(
+            f"progress: {index}/{total_rows} status={extraction_status} "
+            f"remaining={total_rows - index} title={row['title']}"
+        )
 
     status_counts: dict[str, int] = {}
     for result in results:

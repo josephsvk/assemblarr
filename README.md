@@ -130,6 +130,16 @@ docker compose -f "docker compose.yml" up -d assemblarr-worker
 docker compose -f "docker compose.yml" logs -f assemblarr-worker
 ```
 
+One-shot background audio-backup service:
+
+```bash
+docker compose -f "docker compose.yml" up -d assemblarr-audio-backup
+docker compose -f "docker compose.yml" logs -f assemblarr-audio-backup
+docker compose -f "docker compose.yml" ps assemblarr-audio-backup
+```
+
+`assemblarr-audio-backup` is configured with `restart: on-failure:5`, so a transient failure such as a temporary Postgres recovery event will be retried automatically. The job logs one progress line per movie in the form `progress: done/total status=... remaining=... title=...`.
+
 Container safety defaults:
 
 - runs as a non-root `assemblarr` user
@@ -249,6 +259,26 @@ Apply bulk library audio backup for all `2160p`-tagged movies:
 
 ```bash
 python3 scripts/archive_library_audio_by_tag.py --batch --apply
+```
+
+Run the same backup flow in Docker as a detached one-shot job:
+
+```bash
+docker compose -f "docker compose.yml" up -d assemblarr-audio-backup
+docker compose -f "docker compose.yml" logs -f assemblarr-audio-backup
+docker compose -f "docker compose.yml" ps assemblarr-audio-backup
+```
+
+Track backup progress in Postgres:
+
+```bash
+docker compose -f "docker compose.yml" exec -T postgres psql -U assemblarr -d assemblarr -c "
+SELECT extraction_status, count(*)
+FROM library_audio_backup_jobs
+WHERE source = 'radarr' AND tag_label = '2160p'
+GROUP BY extraction_status
+ORDER BY extraction_status;
+"
 ```
 
 Scan subtitles into the local DB only:

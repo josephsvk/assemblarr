@@ -12,6 +12,8 @@ Archives audio streams from existing library movie files selected by a local tag
 - By default it archives all audio streams from the selected movie file.
 - If `library_audio_backup.include_languages` is set, only those stream languages are extracted.
 - Repeated `--apply` runs can skip already archived items when the source file path, size, and mtime still match the saved audit row.
+- The `--apply` path writes one movie at a time, so a later rerun can continue safely after a host or Postgres interruption.
+- The detached Docker service can be restarted on failure, and the script prints one progress line per processed movie.
 
 ## Inputs
 
@@ -29,6 +31,7 @@ Archives audio streams from existing library movie files selected by a local tag
 
 - Archived audio files in `DOWNLOAD_ROOT/assemblarr/archive/...`
 - Audit rows in `library_audio_backup_jobs`
+- `library_audio_backup_jobs.extraction_status` records progress such as `audio_archived`, `already_archived`, `missing_library_file`, or `no_selected_languages`
 
 ## Important Config
 
@@ -56,4 +59,16 @@ python3 scripts/archive_library_audio_by_tag.py
 python3 scripts/archive_library_audio_by_tag.py --batch --limit 10
 python3 scripts/archive_library_audio_by_tag.py --batch --apply
 python3 scripts/archive_library_audio_by_tag.py --tag 2160p --movie-id 542 --apply
+docker compose -f "docker compose.yml" up -d assemblarr-audio-backup
+docker compose -f "docker compose.yml" logs -f assemblarr-audio-backup
+```
+
+Progress query:
+
+```sql
+SELECT extraction_status, count(*)
+FROM library_audio_backup_jobs
+WHERE source = 'radarr' AND tag_label = '2160p'
+GROUP BY extraction_status
+ORDER BY extraction_status;
 ```
