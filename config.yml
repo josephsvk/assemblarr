@@ -47,6 +47,8 @@ prowlarr_search:
       CZ: 1000
       CS: 1000
       SK: 1000
+  availability:
+    min_peers: 3
   scoring:
     seeders_multiplier: 2
     audio:
@@ -76,6 +78,13 @@ prowlarr_search:
       - Telesync
       - HDCAM
       - HDTS
+      - kolekcia
+      - collection
+      - trilogy
+      - trilogie
+      - 1-3
+      - 1 3
+      - pack
 
 tagging:
   apply_to_arr: true
@@ -162,7 +171,7 @@ assemblarr_library:
     archive: archive
     failed: failed
   min_free_gb: 100
-  max_candidate_size_gb: 200
+  max_candidate_size_gb: 100
   filename_prefix: assemblarr
   transfer_policy:
     keep_original_artifact: true
@@ -170,19 +179,154 @@ assemblarr_library:
     delete_download_after_import: false
 
 download_workspace:
-  use_library: true
+  use_library: false
+  root_env: DOWNLOAD_ROOT
+  subdir: assemblarr
+  incoming_folder: incoming
+  processing_folder: processing
+  archive_folder: archive
+  failed_folder: failed
 
 download_clients:
-  enabled: false
+  enabled: true
   preferred: qbittorrent
   qbittorrent:
     url_env: QBITTORRENT_URL
     username_env: QBITTORRENT_USERNAME
     password_env: QBITTORRENT_PASSWORD
     category: assemblarr
-    save_path: /home/joseph/assemblarr/assemblarr_library/incoming
+    max_active_torrents: 5
+    seed_ratio_limit: 0
+    remove_completed_from_client: true
+    save_path_env: DOWNLOAD_ROOT
+    save_path_subdir: assemblarr/incoming
   sabnzbd:
     url_env: SABNZBD_URL
     api_key_env: SABNZBD_API_KEY
     category: assemblarr
-    dir: /home/joseph/assemblarr/assemblarr_library/incoming
+    dir_env: DOWNLOAD_ROOT
+    dir_subdir: assemblarr/incoming
+
+download_worker:
+  poll_seconds: 60
+  queue_fill_per_cycle: 5
+  max_targets_per_queue_run: 50
+  keep_downloaded_files: true
+  postprocess:
+    library_audio_remux:
+      enabled: true
+      max_per_cycle: 1
+  stalled:
+    enabled: true
+    minutes: 180
+    remove_from_client: true
+    move_to_rss_waitlist: true
+
+download_scan:
+  video_extensions:
+    - .mkv
+    - .mp4
+    - .avi
+    - .m4v
+    - .ts
+  subtitle_extensions:
+    - .srt
+    - .ass
+    - .ssa
+    - .vtt
+    - .sub
+  archive_extensions:
+    - .zip
+    - .rar
+    - .7z
+    - .tar
+    - .gz
+  audio_languages:
+    cz:
+      tokens:
+        - cz
+        - cs
+        - cze
+        - ces
+        - czech
+    sk:
+      tokens:
+        - sk
+        - svk
+        - slk
+        - slo
+        - slovak
+        - slovakian
+  audio_extract:
+    enabled: true
+    output_subdir: audio_extracts
+    output_extension: .mka
+    keep_original_files: true
+
+postprocess_import:
+  preferred_audio_languages:
+    - cz
+    - sk
+  remux:
+    output_subdir: remux_imports
+    output_extension: .mkv
+    include_subtitles: true
+  radarr:
+    enabled: true
+    base_url_env: RADARR_URL
+    api_key_env: RADARR_API_KEY
+    sync_after_import: true
+  library_audio_remux:
+    enabled: true
+    temp_suffix: .assemblarr-remux
+    include_original_audio: true
+    include_subtitles: true
+    set_preferred_audio_default: true
+    archive_subdir: library_audio_archive
+    sync_audio:
+      enabled: true
+      reference_audio_stream_index:
+      synced_codec: eac3
+      synced_bitrate_2ch: 384k
+      synced_bitrate_multichannel: 640k
+      duration_tolerance_seconds: 0.25
+      rate_tolerance: 0.0000001
+      archive_subdir: synced_audio
+    compat_stereo:
+      enabled: true
+      codec: aac
+      bitrate: 192k
+      channels: 2
+      title_suffix: Stereo (Assemblarr)
+
+quality_tagging:
+  apply_to_arr: true
+  apply_to_database: true
+  sources:
+    - radarr
+  resolution_tags:
+    2160p:
+      label: 2160p
+      tokens:
+        - 2160p
+      quality_resolution: 2160
+    1080p:
+      label: 1080p
+      tokens:
+        - 1080p
+      quality_resolution: 1080
+    720p:
+      label: 720p
+      tokens:
+        - 720p
+      quality_resolution: 720
+    576p:
+      label: 576p
+      tokens:
+        - 576p
+      quality_resolution: 576
+    480p:
+      label: 480p
+      tokens:
+        - 480p
+      quality_resolution: 480

@@ -14,6 +14,7 @@ Searches Prowlarr for releases that contain the configured Czech or Slovak langu
 - Releases without any configured language token are ignored.
 - Releases containing configured reject tokens such as `CAM`, `TS`, or `HDCAM` are ignored.
 - Scoring prioritizes wanted language first, then audio format, video resolution, source type, and seeders.
+- Torrent candidates below the configured minimum peer count are rejected before scoring.
 - Prowlarr release metadata can vary by indexer, so title parsing should be treated as a ranking signal, not as final proof of audio or subtitles.
 
 ## Inputs
@@ -41,6 +42,7 @@ Searches Prowlarr for releases that contain the configured Czech or Slovak langu
 - Console report with the local target movie.
 - Ranked Prowlarr candidates.
 - Score reasons for each candidate.
+- Peer counts for each candidate.
 - Whether a download or magnet URL is present.
 
 ## Example

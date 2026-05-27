@@ -70,6 +70,31 @@ def score_named_tokens(text: str, scores: dict[str, int]) -> tuple[int, list[str
     return total, matched
 
 
+def to_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def release_protocol(release: dict[str, Any]) -> str:
+    return str(release.get("protocol") or "").strip().lower()
+
+
+def release_peers(release: dict[str, Any]) -> int:
+    explicit_peers = release.get("peers")
+    if explicit_peers not in (None, ""):
+        return to_int(explicit_peers)
+    return to_int(release.get("seeders")) + to_int(release.get("leechers"))
+
+
+def is_torrent_release(release: dict[str, Any]) -> bool:
+    protocol = release_protocol(release)
+    if protocol:
+        return protocol == "torrent"
+    return bool(release.get("magnetUrl")) or release.get("seeders") is not None or release.get("peers") is not None
+
+
 def score_release(release: dict[str, Any], search_config: dict[str, Any]) -> dict[str, Any] | None:
     text = release_text(release)
     language = search_config["language"]
@@ -80,6 +105,12 @@ def score_release(release: dict[str, Any], search_config: dict[str, Any]) -> dic
     scoring = search_config.get("scoring", {})
     reject_tokens = [str(token) for token in scoring.get("reject_tokens", [])]
     if reject_tokens and token_pattern(reject_tokens).search(text):
+        return None
+
+    availability = search_config.get("availability", {})
+    min_peers = int(availability.get("min_peers", 0))
+    peer_count = release_peers(release)
+    if min_peers and is_torrent_release(release) and peer_count < min_peers:
         return None
 
     total = 0
@@ -96,11 +127,13 @@ def score_release(release: dict[str, Any], search_config: dict[str, Any]) -> dic
         if matched:
             reasons.append(f"{group_name}={'+'.join(matched)}:{points}")
 
-    seeders = release.get("seeders") or 0
+    seeders = to_int(release.get("seeders"))
     seed_points = int(seeders) * int(scoring.get("seeders_multiplier", 0))
     total += seed_points
     if seed_points:
         reasons.append(f"seeders={seeders}:{seed_points}")
+    if peer_count:
+        reasons.append(f"peers={peer_count}")
 
     size = release.get("size") or 0
     return {
@@ -110,6 +143,8 @@ def score_release(release: dict[str, Any], search_config: dict[str, Any]) -> dic
         "indexer": release.get("indexer") or "",
         "indexer_id": release.get("indexerId"),
         "seeders": seeders,
+        "peers": peer_count,
+        "protocol": release_protocol(release) or ("torrent" if is_torrent_release(release) else ""),
         "size_gb": round(int(size) / 1024 / 1024 / 1024, 2) if size else 0,
         "guid": release.get("guid") or "",
         "download_url": release.get("downloadUrl") or "",
@@ -118,7 +153,7 @@ def score_release(release: dict[str, Any], search_config: dict[str, Any]) -> dic
     }
 
 
-def search_movie(row: dict[str, Any], search_config: dict[str, Any]) -> list[dict[str, Any]]:
+def search_movie_diagnostics(row: dict[str, Any], search_config: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, int]]:
     query = f"{row['title']} {row['year']}".strip()
     params: dict[str, Any] = {
         "query": query,
@@ -136,13 +171,39 @@ def search_movie(row: dict[str, Any], search_config: dict[str, Any]) -> list[dic
         params,
     )
 
+    required_tokens = [str(token) for token in search_config["language"]["required_any_tokens"]]
+    reject_tokens = [str(token) for token in search_config.get("scoring", {}).get("reject_tokens", [])]
+    min_peers = int(search_config.get("availability", {}).get("min_peers", 0))
+    diagnostics = {
+        "total_releases": len(releases),
+        "language_rejected": 0,
+        "reject_token_rejected": 0,
+        "peer_rejected": 0,
+        "accepted": 0,
+    }
     scored = []
     for release in releases:
+        text = release_text(release)
+        if not token_pattern(required_tokens).search(text):
+            diagnostics["language_rejected"] += 1
+            continue
+        if reject_tokens and token_pattern(reject_tokens).search(text):
+            diagnostics["reject_token_rejected"] += 1
+            continue
+        if min_peers and is_torrent_release(release) and release_peers(release) < min_peers:
+            diagnostics["peer_rejected"] += 1
+            continue
         item = score_release(release, search_config)
         if item is not None:
             scored.append(item)
+            diagnostics["accepted"] += 1
 
-    return sorted(scored, key=lambda item: (item["score"], item["seeders"], item["size_gb"]), reverse=True)
+    return sorted(scored, key=lambda item: (item["score"], item["seeders"], item["peers"], item["size_gb"]), reverse=True), diagnostics
+
+
+def search_movie(row: dict[str, Any], search_config: dict[str, Any]) -> list[dict[str, Any]]:
+    scored, _ = search_movie_diagnostics(row, search_config)
+    return scored
 
 
 def parse_args() -> argparse.Namespace:
@@ -167,17 +228,20 @@ def main() -> int:
         return 0
 
     movie = missing[0]
-    results = search_movie(movie, config["prowlarr_search"])
+    results, diagnostics = search_movie_diagnostics(movie, config["prowlarr_search"])
 
     print(f"Search target: {movie['title']} ({movie['year']})")
     print(f"Current file: {movie['path']}")
     if not results:
         print("No Prowlarr releases matched configured language tokens.")
+        print(f"peer_rejected: {diagnostics['peer_rejected']}")
         return 2
 
     print(f"Top {min(args.top, len(results))} Prowlarr candidates:")
     for index, result in enumerate(results[: args.top], start=1):
-        print(f"{index}. score={result['score']} seeders={result['seeders']} size_gb={result['size_gb']}")
+        print(
+            f"{index}. score={result['score']} seeders={result['seeders']} peers={result['peers']} size_gb={result['size_gb']}"
+        )
         print(f"   indexer: {result['indexer']}")
         print(f"   title: {result['title']}")
         print(f"   reasons: {', '.join(result['reasons'])}")

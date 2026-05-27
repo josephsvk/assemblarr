@@ -25,6 +25,7 @@ except ImportError as exc:
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "schema.sql"
+SCHEMA_LOCK_KEY = 42424201
 
 
 def load_env(path: Path) -> None:
@@ -69,6 +70,11 @@ def api_get(base_url: str, api_key: str, path: str, params: dict[str, Any] | Non
 
 
 def init_db(conn: psycopg.Connection[Any]) -> None:
+    ensure_schema(conn)
+
+
+def ensure_schema(conn: psycopg.Connection[Any]) -> None:
+    conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_KEY,))
     conn.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
