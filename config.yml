@@ -337,19 +337,7 @@ library_audio_backup:
   default_tag: 2160p
   archive_subdir: library_audio_backups
   output_extension: .mka
-  language_groups:
-    cz:
-      - cz
-      - cs
-      - cze
-      - ces
-      - czech
-    sk:
-      - sk
-      - svk
-      - slk
-      - slo
-      - slovak
-      - slovakian
-  include_languages: []
+  include_languages: 
+    - cz
+    - sk
   keep_existing: true
