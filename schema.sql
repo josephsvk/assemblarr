@@ -167,3 +167,21 @@ CREATE TABLE IF NOT EXISTS library_audio_remux_jobs (
   updated_at TIMESTAMPTZ DEFAULT now(),
   UNIQUE(download_job_id)
 );
+
+CREATE TABLE IF NOT EXISTS library_audio_backup_jobs (
+  id BIGSERIAL PRIMARY KEY,
+  source TEXT NOT NULL,
+  media_type TEXT NOT NULL,
+  source_id INTEGER NOT NULL,
+  file_source_id INTEGER,
+  tag_label TEXT NOT NULL,
+  library_video_path TEXT NOT NULL,
+  output_root TEXT NOT NULL,
+  extraction_status TEXT NOT NULL,
+  extracted_tracks JSONB NOT NULL DEFAULT '[]'::jsonb,
+  probe_streams JSONB NOT NULL DEFAULT '[]'::jsonb,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(source, media_type, source_id, tag_label)
+);

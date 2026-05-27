@@ -7,23 +7,23 @@ Assemblarr is an AI-assisted media workflow prototype for scanning Radarr/Sonarr
 Assemblarr currently works like this:
 
 Radarr + Sonarr sync
--> loads library items and media files into Postgres
--> tags detected audio language state in Arr and/or database
--> scans subtitle state and stores or tags subtitle findings
--> finds titles missing the configured CZ/SK language tokens
--> searches Prowlarr for better matching releases
--> scores candidates and selects the best release
--> rejects torrent candidates below the configured minimum peer count
--> saves `.torrent`, `.nzb`, or `.magnet` into the staging workspace
--> optionally submits the staged artifact to qBittorrent
--> records the staged job in Postgres
--> if no acceptable candidate exists yet, records the title into the RSS waitlist for later follow-up
--> worker watches qBittorrent and keeps at most the configured number of active torrents
--> when a download completes, worker scans the real downloaded files and stores file-level observations
--> worker extracts matching CZ/SK audio tracks from completed video files
--> when configured seeding ratio is `0`, the completed torrent is removed from qBittorrent without deleting downloaded files
--> when a torrent stays stalled longer than the configured timeout, worker can remove it from qBittorrent and push the title back to the RSS waitlist
--> downloaded files stay on disk for later extraction, audio verification, and import
+- loads library items and media files into Postgres
+- tags detected audio language state in Arr and/or database
+- scans subtitle state and stores or tags subtitle findings
+- finds titles missing the configured CZ/SK language tokens
+- searches Prowlarr for better matching releases
+- scores candidates and selects the best release
+- rejects torrent candidates below the configured minimum peer count
+- saves `.torrent`, `.nzb`, or `.magnet` into the staging workspace
+- optionally submits the staged artifact to qBittorrent
+- records the staged job in Postgres
+- if no acceptable candidate exists yet, records the title into the RSS waitlist for later follow-up
+- worker watches qBittorrent and keeps at most the configured number of active torrents
+- when a download completes, worker scans the real downloaded files and stores file-level observations
+- worker extracts matching CZ/SK audio tracks from completed video files
+- when configured seeding ratio is `0`, the completed torrent is removed from qBittorrent without deleting downloaded files
+- when a torrent stays stalled longer than the configured timeout, worker can remove it from qBittorrent and push the title back to the RSS waitlist
+- downloaded files stay on disk for later extraction, audio verification, and import
 
 Planned next flow:
 
@@ -52,6 +52,7 @@ Current state:
 - remuxed Radarr movie imports can be prepared and sent back through Radarr manual import
 - imported Radarr movies can be finalized with rescan, rename, and final language tag refresh
 - existing Radarr movie video can be remuxed in place with extracted CZ/SK audio from a download
+- current library movie audio can be archived in bulk by a selected local tag such as `2160p`
 - downloaded files are kept and not deleted automatically
 - automatic extraction, matching, and import into the correct movie is not implemented yet
 
@@ -238,6 +239,18 @@ Apply resolution tags across the synced Radarr library:
 python3 scripts/apply_resolution_tag.py --batch --apply
 ```
 
+Dry-run bulk library audio backup for 4K-tagged movies:
+
+```bash
+python3 scripts/archive_library_audio_by_tag.py --batch --limit 10
+```
+
+Apply bulk library audio backup for all `2160p`-tagged movies:
+
+```bash
+python3 scripts/archive_library_audio_by_tag.py --batch --apply
+```
+
 Scan subtitles into the local DB only:
 
 ```bash
@@ -259,6 +272,8 @@ python3 scripts/remux_library_video_with_download_audio.py --download-job-id 28 
 The library-audio remux keeps the existing library video master, appends preferred CZ/SK audio when found, and can also generate an extra AAC stereo compatibility track for weaker playback devices.
 
 The long-running worker can now continue the movie pipeline automatically after `audio_extracted`: it will remux the preferred CZ/SK audio into the existing Radarr movie file, add the optional AAC stereo compatibility track, rescan/rename in Radarr, archive the extracted audio, and keep the language and resolution tags in sync.
+
+Bulk library audio backup by tag is also available. It only extracts audio streams from the already synced library file and stores them into the Assemblarr archive workspace. It does not remux, rename, or retag the movie.
 
 Timing fix and compatibility audio are configurable in `config.yml`:
 
@@ -285,6 +300,27 @@ postprocess_import:
 - `duration_tolerance_seconds`: maximum allowed length drift after sync.
 - `synced_bitrate_2ch` and `synced_bitrate_multichannel`: target bitrate for the synchronized dubbing master.
 - `compat_stereo`: creates a lightweight playback-friendly track after sync, so the stereo version is derived from the corrected timing and not from the unsynchronized source.
+
+Library-audio backup by tag is configurable here:
+
+```yaml
+library_audio_backup:
+  enabled: true
+  source: radarr
+  default_tag: 2160p
+  archive_subdir: library_audio_backups
+  output_extension: .mka
+  language_groups:
+    cz: [cz, cs, cze, ces, czech]
+    sk: [sk, svk, slk, slo, slovak, slovakian]
+  include_languages: []
+  keep_existing: true
+```
+
+- `default_tag`: local `media_item_tags.tag_label` used when `--tag` is not passed.
+- `language_groups`: configurable alias groups used to normalize stream language codes.
+- `include_languages`: optional audio-language allowlist. Keep it empty to archive every audio stream. `cz` and `sk` are enough when the alias groups are defined above.
+- `keep_existing`: skips already archived movies when the source file still matches the saved audit row.
 
 ## Download Clients
 

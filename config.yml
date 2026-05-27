@@ -330,3 +330,26 @@ quality_tagging:
       tokens:
         - 480p
       quality_resolution: 480
+
+library_audio_backup:
+  enabled: true
+  source: radarr
+  default_tag: 2160p
+  archive_subdir: library_audio_backups
+  output_extension: .mka
+  language_groups:
+    cz:
+      - cz
+      - cs
+      - cze
+      - ces
+      - czech
+    sk:
+      - sk
+      - svk
+      - slk
+      - slo
+      - slovak
+      - slovakian
+  include_languages: []
+  keep_existing: true
