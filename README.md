@@ -54,7 +54,7 @@ Current state:
 - existing Radarr movie video can be remuxed in place with extracted CZ/SK audio from a download
 - current library movie audio can be archived in bulk by a selected local tag such as `2160p`
 - downloaded files are kept and not deleted automatically
-- automatic extraction, matching, and import into the correct movie is not implemented yet
+- automatic archive extraction and full series import are not implemented yet; movie audio extraction and library remux post-processing are implemented for Radarr jobs with a matched movie file
 
 ## Warning
 
@@ -293,6 +293,7 @@ Find and stage one Prowlarr artifact into the configured staging workspace:
 ```bash
 python3 scripts/queue_prowlarr_download.py --max-targets 50
 python3 scripts/queue_prowlarr_download.py --max-targets 50 --apply
+python3 scripts/find_audio_sync_test_candidate.py --max-size-gb 8 --limit 5
 python3 scripts/remux_and_import_radarr_movie.py
 python3 scripts/remux_and_import_radarr_movie.py --download-job-id 4 --apply
 python3 scripts/remux_library_video_with_download_audio.py --download-job-id 28
@@ -301,9 +302,13 @@ python3 scripts/remux_library_video_with_download_audio.py --download-job-id 28 
 
 The library-audio remux keeps the existing library video master, appends preferred CZ/SK audio when found, and can also generate an extra AAC stereo compatibility track for weaker playback devices.
 
+Use `find_audio_sync_test_candidate.py` on the media server to find a small Radarr movie file that has extracted CZ/SK audio on disk. It prints the matching `remux_library_video_with_download_audio.py` dry-run and apply commands.
+
 The long-running worker can now continue the movie pipeline automatically after `audio_extracted`: it will remux the preferred CZ/SK audio into the existing Radarr movie file, add the optional AAC stereo compatibility track, rescan/rename in Radarr, archive the extracted audio, and keep the language and resolution tags in sync.
 
 Bulk library audio backup by tag is also available. It only extracts audio streams from the already synced library file and stores them into the Assemblarr archive workspace. It does not remux, rename, or retag the movie.
+
+On CPU-only hosts, the movie video is stream-copied and should not be transcoded. The expensive stages are `synaudio-cli`, the synchronized E-AC-3 encode, and the optional AAC stereo compatibility encode. On a dual-socket Xeon E5-2650L v4 host, keep video remuxing as `-c copy`, start with one or two library-audio remux jobs per worker cycle, and increase only after checking disk I/O wait and Radarr scan time.
 
 Timing fix and compatibility audio are configurable in `config.yml`:
 
@@ -329,6 +334,7 @@ postprocess_import:
 - `reference_audio_stream_index`: optional explicit library audio stream index used as the sync reference.
 - `duration_tolerance_seconds`: maximum allowed length drift after sync.
 - `synced_bitrate_2ch` and `synced_bitrate_multichannel`: target bitrate for the synchronized dubbing master.
+- synchronized tracks keep the same audio-vs-video timestamp offset as the selected reference audio stream when they are muxed back into the library file.
 - `compat_stereo`: creates a lightweight playback-friendly track after sync, so the stereo version is derived from the corrected timing and not from the unsynchronized source.
 
 Library-audio backup by tag is configurable here:

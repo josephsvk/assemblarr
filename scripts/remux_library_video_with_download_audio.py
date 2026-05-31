@@ -225,6 +225,37 @@ def sync_audio_bitrate(channels: int, config: dict[str, Any]) -> str:
     return str(settings.get("synced_bitrate_multichannel", "640k"))
 
 
+def float_or_none(value: Any) -> float | None:
+    if value in (None, "", "N/A"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def stream_start_time(stream: dict[str, Any]) -> float:
+    start_time = float_or_none(stream.get("start_time"))
+    if start_time is not None:
+        return start_time
+    tags = dict(stream.get("tags") or {})
+    duration = float_or_none(tags.get("DURATION"))
+    if duration is not None:
+        return 0.0
+    return 0.0
+
+
+def reference_audio_video_offset(library_video_path: Path, audio_stream_index: int) -> float:
+    streams = ffprobe_streams(library_video_path)
+    video_streams = [stream for stream in streams if str(stream.get("codec_type") or "") == "video"]
+    audio_streams = [stream for stream in streams if str(stream.get("codec_type") or "") == "audio"]
+    if not video_streams:
+        raise SystemExit(f"No video stream found in library video: {library_video_path}")
+    if audio_stream_index >= len(audio_streams):
+        raise SystemExit(f"Reference audio stream index {audio_stream_index} does not exist in: {library_video_path}")
+    return stream_start_time(audio_streams[audio_stream_index]) - stream_start_time(video_streams[0])
+
+
 def parse_synaudio_measurement(output: str) -> tuple[float, float, float]:
     match = SYNC_PATTERN.search(output)
     if not match:
@@ -303,11 +334,13 @@ def synchronize_track(
     source_audio_path = Path(str(track["output_path"]))
     sync_root = archive_sync_root(config, queue_id)
     reference_index = reference_audio_stream_index(library_video_path, config)
+    mux_input_offset = reference_audio_video_offset(library_video_path, reference_index)
     reference_audio_path = sync_root / f"reference-a{reference_index:02d}.mka"
     synced_output_path = sync_root / f"audio-synced-{language}.eac3"
     metadata = {
         "enabled": bool(settings.get("enabled", True)),
         "reference_audio_stream_index": reference_index,
+        "reference_audio_video_offset_seconds": mux_input_offset,
         "reference_audio_path": str(reference_audio_path),
         "source_audio_path": str(source_audio_path),
         "synced_output_path": str(synced_output_path),
@@ -316,6 +349,7 @@ def synchronize_track(
         prepared = dict(track)
         prepared["prepared_output_path"] = str(source_audio_path)
         prepared["sync_applied"] = False
+        prepared["mux_input_offset_seconds"] = 0.0
         return prepared, metadata
 
     sync_root.mkdir(parents=True, exist_ok=True)
@@ -327,6 +361,8 @@ def synchronize_track(
         check=False,
     )
     combined_output = "\n".join(part for part in (synaudio.stdout, synaudio.stderr) if part)
+    if synaudio.returncode != 0:
+        raise RuntimeError(f"synaudio-cli failed with exit code {synaudio.returncode}: {combined_output}")
     trim_start, trim_end, rate = parse_synaudio_measurement(combined_output)
 
     channels = int(track.get("channels") or 6)
@@ -383,6 +419,7 @@ def synchronize_track(
     prepared = dict(track)
     prepared["prepared_output_path"] = str(synced_output_path)
     prepared["sync_applied"] = True
+    prepared["mux_input_offset_seconds"] = mux_input_offset
     return prepared, metadata
 
 
@@ -446,6 +483,9 @@ def build_ffmpeg_command(
     command = ["ffmpeg", "-y", "-i", str(library_video_path)]
     input_tracks = copied_tracks + stereo_tracks
     for track in input_tracks:
+        offset = float_or_none(track.get("mux_input_offset_seconds")) or 0.0
+        if abs(offset) >= 0.001:
+            command.extend(["-itsoffset", f"{offset:.9f}"])
         command.extend(["-i", str(track.get("prepared_output_path") or track["output_path"])])
 
     if settings.get("include_original_audio", True):

@@ -10,3 +10,10 @@ download_workspace
 .codex
 .agents
 .env
+.codegraph/
+__pycache__/
+*/__pycache__/
+.pytest_cache/
+.tags
+.agent-files.txt
+assemblarr.dump

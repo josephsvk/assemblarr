@@ -9,6 +9,9 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 .venv/
 venv/
 
@@ -16,6 +19,11 @@ venv/
 postgres/
 assemblarr_library/
 download_workspace/
+assemblarr.dump
+*.dump
+*.sqlite
+*.sqlite3
+*.db
 
 # Download artifacts and media workspace files
 *.torrent
@@ -23,10 +31,30 @@ download_workspace/
 *.magnet
 *.part
 *.tmp
+*.log
+*.mkv
+*.mp4
+*.avi
+*.mov
+*.m4v
+*.mka
+*.mp3
+*.aac
+*.ac3
+*.eac3
+*.flac
+*.srt
+*.ass
+*.ssa
+*.vtt
+*.sub
 
-# Local Codex/runtime scratch
+# Local indexes and agent/runtime scratch
 .codex/
 .agents/
+.codegraph/
+.tags
+.agent-files.txt
 
 # OS/editor noise
 .DS_Store

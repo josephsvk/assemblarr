@@ -14,6 +14,7 @@ Takes the current Radarr library movie file as the video master and muxes in ext
 - It archives the extracted audio tracks into the Assemblarr archive workspace without deleting the originals.
 - It verifies the final library file directly with `ffprobe`.
 - It can synchronize the extracted CZ/SK audio against the existing library movie audio before muxing it back.
+- Synchronized audio is muxed back with the same audio-vs-video timestamp offset as the selected reference library audio stream.
 - It can generate extra AAC stereo compatibility tracks for the preferred CZ/SK audio, while still keeping the original higher-quality audio streams.
 - If the library file already contains the preferred CZ/SK audio, a repeated `--apply` run switches into a recovery path and records the audit without remuxing the movie again.
 
@@ -46,6 +47,7 @@ Takes the current Radarr library movie file as the video master and muxes in ext
 - `postprocess_import.library_audio_remux.sync_audio.reference_audio_stream_index`
   - Optional explicit library audio stream index to use as the sync reference.
   - When empty, the script prefers the default library audio stream and otherwise uses the first one.
+  - The selected reference stream also supplies the final mux input offset for synchronized external audio.
 - `postprocess_import.library_audio_remux.sync_audio.synced_codec`
   - Codec for the synchronized high-quality dubbing master before muxing.
 - `postprocess_import.library_audio_remux.sync_audio.synced_bitrate_2ch`
