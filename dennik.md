@@ -226,3 +226,22 @@ Projektove subory a Codex priprava:
   - `python3 -m py_compile scripts/manage_library_workspace.py scripts/queue_prowlarr_download.py`
   - `python3 scripts/manage_library_workspace.py`
 - `git status` zlyhal, pretoze adresar nie je realny git repozitar.
+
+2026-05-31
+
+- Library audio remux je zatial oznacovany ako provizorny:
+  - nove CZ/SK audio title metadata nesu suffix `Assemblarr - possibly incorrect or incomplete`
+  - AAC stereo compatibility track je nastavena ako defaultna audio stopa, aby prehravanie bolo stabilnejsie aj na slabsich prehravacoch
+- `config.yml` upraveny pre rychlejsi priechod vacsim poctom filmov:
+  - `postprocess_import.library_audio_remux.sync_audio.precision_scale` znizeny z `0.5` na `0.25`
+- `scripts/queue_prowlarr_download.py` teraz pri tom istom filme preskoci release, ktory uz bol raz skuseny:
+  - porovnava `release_guid`
+  - fallback porovnava aj `release_title`
+  - ciel je, aby dalsi run skusal iny release namiesto opakovaneho stiahnutia rovnakej verzie
+- Pri dalsom pokuse ostava zachovana kontrola dlzky extrahovaneho audia oproti referencnej library audio stope este pred remuxom:
+  - `preflight_duration_tolerance_seconds`
+  - nasledne aj finalna kontrola po sync encode cez `duration_tolerance_seconds`
+- README a `scripts/remux_library_video_with_download_audio.md` doplnene o:
+  - provizorne pomenovanie stop
+  - preferenciu AAC stereo compatibility tracku ako defaultu
+  - retry spravanie na iny release pri dalsom queue rune

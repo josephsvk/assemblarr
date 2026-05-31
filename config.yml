@@ -222,6 +222,25 @@ download_worker:
     remove_from_client: true
     move_to_rss_waitlist: true
 
+pipeline_orchestrator:
+  missing_search:
+    enabled: true
+    interval_seconds: 180
+    max_targets_per_run: 50
+    max_queue_additions_per_run: 2
+  rss_waitlist:
+    enabled: true
+    interval_seconds: 300
+    max_targets_per_run: 25
+    max_queue_additions_per_run: 1
+  download_sync_extract:
+    enabled: true
+    interval_seconds: 60
+  library_audio_remux:
+    enabled: true
+    interval_seconds: 120
+    max_per_run: 1
+
 download_scan:
   video_extensions:
     - .mkv
@@ -282,10 +301,46 @@ postprocess_import:
     include_original_audio: true
     include_subtitles: true
     set_preferred_audio_default: true
+    track_title_suffix: (Assemblarr - possibly incorrect or incomplete)
     archive_subdir: library_audio_archive
     sync_audio:
       enabled: true
       reference_audio_stream_index:
+      precision_scale: 0.25
+      strategy:
+        method: adaptive_anchor_sync
+        single_anchor_max_duration_diff_seconds: 4.0
+        prefer_silence_windows: true
+        silence_window_status: planned
+        center_trimmed_edges_probe:
+          segment_duration_seconds: 45.0
+          anchor_points:
+            - 0.5
+            - 0.75
+          trim_tolerance_seconds: 2.0
+          rate_tolerance: 0.002
+          sample_length: 0.5
+          sample_gap: 9999.0
+          start_range: 12.0
+          end_range: 12.0
+        profiles:
+          single_anchor:
+            sample_length: 0.25
+            sample_gap: 90.0
+            start_range: 240.0
+            end_range: 120.0
+            rate_tolerance: 0.5
+            rectify: true
+          multi_anchor:
+            sample_length: 0.125
+            sample_gap: 10.0
+            start_range: 180.0
+            end_range: 60.0
+            rate_tolerance: 0.5
+            rectify: true
+      preflight_duration_tolerance_seconds: 12.0
+      duration_mismatch_policy: reject
+      max_silence_padding_seconds: 0.0
       synced_codec: eac3
       synced_bitrate_2ch: 384k
       synced_bitrate_multichannel: 640k
@@ -297,7 +352,8 @@ postprocess_import:
       codec: aac
       bitrate: 192k
       channels: 2
-      title_suffix: Stereo (Assemblarr)
+      prefer_default: true
+      title_suffix: Stereo (Assemblarr - possibly incorrect or incomplete)
 
 quality_tagging:
   apply_to_arr: true

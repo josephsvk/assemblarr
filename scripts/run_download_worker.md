@@ -13,6 +13,7 @@ Runs a long-lived worker that watches qBittorrent jobs, scans completed download
 - It scans completed downloads and stores real file observations in `download_artifact_scans`.
 - It extracts matching CZ/SK audio tracks from completed video files.
 - It can automatically remux extracted CZ/SK audio into the existing Radarr library movie file after extraction succeeds.
+- It can skip the remux stage when the top-level orchestrator wants this worker to focus only on torrent state, scan, and extraction.
 - It can remove completed torrents from qBittorrent while keeping downloaded files on disk.
 - It can expire stalled torrents after a configurable timeout and move them back to `rss_waitlist`.
 - It keeps downloaded files in place and does not delete them.
@@ -43,6 +44,7 @@ Runs a long-lived worker that watches qBittorrent jobs, scans completed download
 
 ```bash
 python3 scripts/run_download_worker.py --once --no-fill-queue
+python3 scripts/run_download_worker.py --once --no-fill-queue --no-library-audio-remux
 python3 scripts/run_download_worker.py --once
 python3 scripts/run_download_worker.py
 ```

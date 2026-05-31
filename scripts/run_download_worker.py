@@ -47,6 +47,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--env-file", default=ROOT / ".env", type=Path)
     parser.add_argument("--once", action="store_true", help="Run one worker cycle and exit.")
     parser.add_argument("--no-fill-queue", action="store_true", help="Do not queue new torrents in this run.")
+    parser.add_argument(
+        "--no-library-audio-remux",
+        action="store_true",
+        help="Do not run the library audio remux postprocess in this run.",
+    )
     parser.add_argument("--poll-seconds", type=int, help="Override download_worker.poll_seconds.")
     return parser.parse_args()
 
@@ -684,7 +689,7 @@ def run_library_audio_remux_postprocess(config: dict[str, Any], limit: int) -> i
     return completed
 
 
-def run_cycle(config: dict[str, Any], fill_queue: bool) -> None:
+def run_cycle(config: dict[str, Any], fill_queue: bool, perform_library_audio_remux: bool) -> None:
     worker_config = config["download_worker"]
     max_targets = int(worker_config.get("max_targets_per_queue_run", 50))
     fill_limit = int(worker_config.get("queue_fill_per_cycle", 1))
@@ -704,7 +709,7 @@ def run_cycle(config: dict[str, Any], fill_queue: bool) -> None:
 
         added = 0
         remuxed = 0
-        if remux_policy["enabled"]:
+        if remux_policy["enabled"] and perform_library_audio_remux:
             remuxed = run_library_audio_remux_postprocess(config, remux_policy["max_per_cycle"])
         if fill_queue:
             added = queue_more_downloads(
@@ -732,10 +737,11 @@ def main() -> int:
     config = load_config(args.config)
     poll_seconds = int(args.poll_seconds or config["download_worker"].get("poll_seconds", 60))
     fill_queue = not args.no_fill_queue
+    perform_library_audio_remux = not args.no_library_audio_remux
 
     while True:
         try:
-            run_cycle(config, fill_queue)
+            run_cycle(config, fill_queue, perform_library_audio_remux)
         except Exception as exc:  # pragma: no cover - defensive loop logging
             LOGGER.exception("worker cycle failed: %s", exc)
 

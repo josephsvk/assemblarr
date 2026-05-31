@@ -25,6 +25,7 @@ services:
   assemblarr:
     build:
       context: .
+      target: runtime
     container_name: assemblarr
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
@@ -53,6 +54,7 @@ services:
   assemblarr-worker:
     build:
       context: .
+      target: runtime
     container_name: assemblarr-worker
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
@@ -78,9 +80,39 @@ services:
       - ${DOWNLOAD_ROOT}:${DOWNLOAD_ROOT}:rw
       - ${ASSEMBLARR_LIBRARY_ROOT}:${ASSEMBLARR_LIBRARY_ROOT}:rw
 
+  assemblarr-orchestrator:
+    build:
+      context: .
+      target: audio-tools
+    container_name: assemblarr-orchestrator
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-assemblarr}:${POSTGRES_PASSWORD:-change_me}@postgres:5432/${POSTGRES_DB:-assemblarr}
+    working_dir: /app
+    command: ["python", "scripts/run_pipeline_orchestrator.py"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - ${MOVIES_LIBRARY_ROOT}:${MOVIES_LIBRARY_ROOT}:rw
+      - ${SERIES_LIBRARY_ROOT}:${SERIES_LIBRARY_ROOT}:ro
+      - ${DOWNLOAD_ROOT}:${DOWNLOAD_ROOT}:rw
+      - ${ASSEMBLARR_LIBRARY_ROOT}:${ASSEMBLARR_LIBRARY_ROOT}:rw
+
   assemblarr-audio-backup:
     build:
       context: .
+      target: runtime
     container_name: assemblarr-audio-backup
     restart: on-failure:5
     user: "${PUID:-1000}:${PGID:-1000}"
@@ -105,6 +137,18 @@ services:
       - ${SERIES_LIBRARY_ROOT}:${SERIES_LIBRARY_ROOT}:ro
       - ${DOWNLOAD_ROOT}:${DOWNLOAD_ROOT}:rw
       - ${ASSEMBLARR_LIBRARY_ROOT}:${ASSEMBLARR_LIBRARY_ROOT}:rw
+
+  assemblarr-test:
+    build:
+      context: .
+      target: test
+    working_dir: /app
+    command:
+      [
+        "sh",
+        "-c",
+        "python -m pytest -q -p no:cacheprovider && python tests/audio_sync_timing_smoke.py",
+      ]
 
 volumes:
   postgres_data:

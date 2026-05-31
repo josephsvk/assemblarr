@@ -77,6 +77,7 @@ OPEN_DOWNLOAD_JOB_STATUSES = (
     "audio_extracted",
     "audio_extraction_failed",
 )
+TARGET_SOURCE_CHOICES = ("missing_language", "rss_waitlist")
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -554,6 +555,61 @@ def upsert_rss_waitlist(
     )
 
 
+def fetch_rss_waitlist_targets(conn: Any, limit: int) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT source, media_type, source_id, title, year, metadata
+        FROM rss_waitlist
+        WHERE status = 'waiting_for_rss'
+        ORDER BY updated_at ASC, id ASC
+        LIMIT %(limit)s
+        """,
+        {"limit": limit},
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def mark_rss_waitlist_status(
+    conn: Any,
+    target: dict[str, Any],
+    *,
+    status: str,
+    reason: str,
+    metadata: dict[str, Any],
+    dry_run: bool,
+) -> None:
+    if dry_run:
+        return
+    conn.execute(
+        """
+        UPDATE rss_waitlist
+        SET status = %(status)s,
+            reason = %(reason)s,
+            metadata = %(metadata)s,
+            updated_at = now()
+        WHERE source = %(source)s
+          AND media_type = %(media_type)s
+          AND source_id = %(source_id)s
+        """,
+        {
+            "source": target["source"],
+            "media_type": target["media_type"],
+            "source_id": target["source_id"],
+            "status": status,
+            "reason": reason,
+            "metadata": Jsonb(metadata),
+        },
+    )
+
+
+def fetch_search_targets(conn: Any, config: dict[str, Any], target_source: str, max_targets: int) -> list[dict[str, Any]]:
+    if target_source == "rss_waitlist":
+        return fetch_rss_waitlist_targets(conn, max_targets)
+    search_check = dict(config["library_checks"]["missing_language"])
+    search_check["limit"] = max_targets
+    return find_missing(conn, search_check)
+
+
 def target_has_open_download_job(conn: Any, target: dict[str, Any]) -> bool:
     row = conn.execute(
         """
@@ -620,11 +676,45 @@ def candidate_already_recorded(conn: Any, target: dict[str, Any], candidate: dic
     return False
 
 
+def candidate_previously_attempted(conn: Any, target: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    release_guid = str(candidate.get("guid") or "").strip()
+    release_title = str(candidate.get("title") or "").strip()
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM download_jobs
+        WHERE source = %(source)s
+          AND media_type = %(media_type)s
+          AND source_id = %(source_id)s
+          AND status != 'superseded_duplicate'
+          AND (
+            (%(release_guid)s != '' AND release_guid = %(release_guid)s)
+            OR (%(release_title)s != '' AND release_title = %(release_title)s)
+          )
+        LIMIT 1
+        """,
+        {
+            "source": target["source"],
+            "media_type": target["media_type"],
+            "source_id": target["source_id"],
+            "release_guid": release_guid,
+            "release_title": release_title,
+        },
+    ).fetchone()
+    return row is not None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Queue one Prowlarr candidate into the configured staging workspace.")
     parser.add_argument("--config", default=ROOT / "config.yml", type=Path)
     parser.add_argument("--env-file", default=ROOT / ".env", type=Path)
     parser.add_argument("--max-targets", type=int, default=25, help="How many missing-language targets to try.")
+    parser.add_argument(
+        "--target-source",
+        choices=TARGET_SOURCE_CHOICES,
+        default="missing_language",
+        help="Choose whether to search from current missing-language items or the rss_waitlist retry backlog.",
+    )
     parser.add_argument("--apply", action="store_true", help="Save the download artifact and insert a DB job.")
     return parser.parse_args()
 
@@ -640,24 +730,30 @@ def main() -> int:
         conn.row_factory = dict_row
         conn.execute(DOWNLOAD_TABLE_SQL)
         conn.execute(RSS_WAITLIST_SQL)
-        search_check = dict(config["library_checks"]["missing_language"])
-        search_check["limit"] = args.max_targets
-        missing = find_missing(conn, search_check)
-        if not missing:
-            print("No missing-language target found for Prowlarr search.")
+        targets = fetch_search_targets(conn, config, args.target_source, args.max_targets)
+        if not targets:
+            if args.target_source == "rss_waitlist":
+                print("No rss_waitlist target found for Prowlarr search.")
+            else:
+                print("No missing-language target found for Prowlarr search.")
             return 0
 
         target = None
         candidate = None
         skipped = []
         candidate_diagnostics: dict[str, int] | None = None
-        for possible_target in missing:
+        for possible_target in targets:
             if target_has_open_download_job(conn, possible_target):
                 skipped.append(f"{possible_target.get('title')} ({possible_target.get('year')})")
                 continue
             candidates, diagnostics = search_movie_diagnostics(possible_target, config["prowlarr_search"])
             if candidates:
-                filtered_candidates = [item for item in candidates if not candidate_already_recorded(conn, possible_target, item)]
+                filtered_candidates = [
+                    item
+                    for item in candidates
+                    if not candidate_already_recorded(conn, possible_target, item)
+                    and not candidate_previously_attempted(conn, possible_target, item)
+                ]
             else:
                 filtered_candidates = []
             if filtered_candidates:
@@ -686,7 +782,7 @@ def main() -> int:
                 )
 
         if target is None or candidate is None:
-            print(f"No Prowlarr candidates found for first {len(missing)} missing-language targets.")
+            print(f"No Prowlarr candidates found for first {len(targets)} {args.target_source} targets.")
             for skipped_target in skipped[:20]:
                 print(f"skipped_no_candidate: {skipped_target}")
             if not dry_run:
@@ -701,11 +797,27 @@ def main() -> int:
         if config.get("download_clients", {}).get("enabled"):
             client_name = str(config.get("download_clients", {}).get("preferred", "qbittorrent"))
         insert_job(conn, target, candidate, status, staging_path, client_name, client_queue_id, dry_run)
+        if args.target_source == "rss_waitlist":
+            mark_rss_waitlist_status(
+                conn,
+                target,
+                status="queued_download",
+                reason="queued candidate from rss_waitlist retry",
+                metadata={
+                    "release_title": candidate["title"],
+                    "release_guid": candidate.get("guid"),
+                    "indexer": candidate.get("indexer"),
+                    "client_queue_id": client_queue_id,
+                    "job_status": status,
+                },
+                dry_run=dry_run,
+            )
         if args.apply:
             conn.commit()
 
     print("Prowlarr download candidate")
     print(f"dry_run: {dry_run}")
+    print(f"target_source: {args.target_source}")
     print(f"targets_tried: {len(skipped) + 1}")
     for skipped_target in skipped[:10]:
         print(f"skipped_no_candidate: {skipped_target}")

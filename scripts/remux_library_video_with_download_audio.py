@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import re
 import shutil
 import subprocess
@@ -55,8 +57,9 @@ LANGUAGE_CODE_MAP = {
     "sk": "slk",
 }
 
+SYNC_VALUE_PATTERN = r"(?:[-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?|nan|inf(?:inity)?)"
 SYNC_PATTERN = re.compile(
-    r"Trim start\s+([-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?)\s+Trim end\s+([-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?)\s+Rate\s+([-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?)",
+    rf"Trim start\s+({SYNC_VALUE_PATTERN})\s+Trim end\s+({SYNC_VALUE_PATTERN})\s+Rate\s+({SYNC_VALUE_PATTERN})",
     re.IGNORECASE,
 )
 
@@ -189,6 +192,219 @@ def sync_audio_config(config: dict[str, Any]) -> dict[str, Any]:
     return dict(remux_config(config).get("sync_audio", {}))
 
 
+def copied_track_title_suffix(config: dict[str, Any]) -> str:
+    return str(remux_config(config).get("track_title_suffix", "(Assemblarr - possibly incorrect or incomplete)"))
+
+
+def passthrough_on_sync_failure(settings: dict[str, Any]) -> bool:
+    return bool(settings.get("passthrough_on_failure", True))
+
+
+def sync_strategy_settings(config: dict[str, Any]) -> dict[str, Any]:
+    return dict(sync_audio_config(config).get("strategy", {}))
+
+
+def choose_sync_strategy(
+    *,
+    reference_duration: float,
+    source_duration: float,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    strategy = sync_strategy_settings(config)
+    method = str(strategy.get("method", "adaptive_anchor_sync"))
+    duration_diff = abs(reference_duration - source_duration)
+    threshold = float(strategy.get("single_anchor_max_duration_diff_seconds", 2.0))
+    profiles = dict(strategy.get("profiles", {}))
+    default_single = {
+        "sample_length": 0.25,
+        "sample_gap": 90.0,
+        "start_range": 240.0,
+        "end_range": 120.0,
+        "rate_tolerance": 0.5,
+        "rectify": True,
+    }
+    default_multi = {
+        "sample_length": 0.125,
+        "sample_gap": 10.0,
+        "start_range": 180.0,
+        "end_range": 60.0,
+        "rate_tolerance": 0.5,
+        "rectify": True,
+    }
+    if method == "adaptive_anchor_sync":
+        profile_name = "single_anchor" if duration_diff <= threshold else "multi_anchor"
+    else:
+        profile_name = str(strategy.get("fixed_profile", "multi_anchor"))
+    raw_profile = dict(profiles.get(profile_name, {}))
+    defaults = default_single if profile_name == "single_anchor" else default_multi
+    profile = {**defaults, **raw_profile}
+    return {
+        "method": method,
+        "profile_name": profile_name,
+        "duration_diff_seconds": duration_diff,
+        "single_anchor_max_duration_diff_seconds": threshold,
+        "prefer_silence_windows": bool(strategy.get("prefer_silence_windows", False)),
+        "silence_window_status": str(strategy.get("silence_window_status", "planned")),
+        "profile": profile,
+    }
+
+
+def build_synaudio_command(reference_audio_path: Path, source_audio_path: Path, strategy_choice: dict[str, Any]) -> list[str]:
+    profile = dict(strategy_choice.get("profile", {}))
+    command = ["synaudio-cli"]
+    if not bool(profile.get("rectify", True)):
+        command.append("--no-rectify")
+    if profile.get("rate_tolerance") is not None:
+        command.extend(["--rate-tolerance", str(profile["rate_tolerance"])])
+    if profile.get("sample_length") is not None:
+        command.extend(["--sample-length", str(profile["sample_length"])])
+    if profile.get("sample_gap") is not None:
+        command.extend(["--sample-gap", str(profile["sample_gap"])])
+    if profile.get("start_range") is not None:
+        command.extend(["--start-range", str(profile["start_range"])])
+    if profile.get("end_range") is not None:
+        command.extend(["--end-range", str(profile["end_range"])])
+    command.extend([str(reference_audio_path), str(source_audio_path)])
+    return command
+
+
+def extract_wav_segment(input_path: Path, start_seconds: float, duration_seconds: float, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{max(0.0, start_seconds):.3f}",
+            "-i",
+            str(input_path),
+            "-t",
+            f"{duration_seconds:.3f}",
+            "-vn",
+            "-sn",
+            "-dn",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            "-c:a",
+            "pcm_s16le",
+            str(output_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def run_synaudio_measurement(
+    reference_audio_path: Path,
+    source_audio_path: Path,
+    strategy_choice: dict[str, Any],
+    precision_scale: float,
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    synced_output_path = source_audio_path.with_name(f"{source_audio_path.stem}.synced{source_audio_path.suffix}")
+    synced_output_path.unlink(missing_ok=True)
+    synaudio_env = os.environ.copy()
+    synaudio_env["SYNAUDIO_PRECISION_SCALE"] = str(precision_scale)
+    synaudio = subprocess.run(
+        build_synaudio_command(reference_audio_path, source_audio_path, strategy_choice),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=synaudio_env,
+    )
+    combined_output = "\n".join(part for part in (synaudio.stdout, synaudio.stderr) if part)
+    return synaudio, combined_output
+
+
+def centered_padding_filter(start_padding_seconds: float, reference_duration: float, channels: int) -> str:
+    delay_ms = max(0, int(round(start_padding_seconds * 1000)))
+    return ",".join(
+        [
+            "adelay=" + "|".join([str(delay_ms)] * channels),
+            "apad",
+            f"atrim=0:{reference_duration:.9f}",
+            "asetpts=PTS-STARTPTS",
+        ]
+    )
+
+
+def centered_edge_probe(
+    *,
+    reference_audio_path: Path,
+    source_audio_path: Path,
+    reference_duration: float,
+    source_duration: float,
+    queue_id: str,
+    language: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    strategy = sync_strategy_settings(config)
+    probe = dict(strategy.get("center_trimmed_edges_probe", {}))
+    probe_duration = float(probe.get("segment_duration_seconds", 45.0))
+    probe_points = [float(item) for item in probe.get("anchor_points", [0.5, 0.75])]
+    trim_tolerance = float(probe.get("trim_tolerance_seconds", 2.0))
+    rate_tolerance = float(probe.get("rate_tolerance", 0.002))
+    precision_scale = float(sync_audio_config(config).get("precision_scale", 1.0))
+    probe_strategy = {
+        "profile": {
+            "rectify": True,
+            "rate_tolerance": 0.5,
+            "sample_length": probe.get("sample_length", 0.5),
+            "sample_gap": probe.get("sample_gap", 9999.0),
+            "start_range": probe.get("start_range", 12.0),
+            "end_range": probe.get("end_range", 12.0),
+        }
+    }
+
+    sync_root = archive_sync_root(config, queue_id) / f"probe-{language}"
+    results: list[dict[str, Any]] = []
+    for anchor in probe_points:
+        reference_start = max(0.0, (reference_duration * anchor) - (probe_duration / 2.0))
+        source_start = max(0.0, (source_duration * anchor) - (probe_duration / 2.0))
+        reference_segment = sync_root / f"reference-{anchor:.2f}.wav"
+        source_segment = sync_root / f"source-{anchor:.2f}.wav"
+        extract_wav_segment(reference_audio_path, reference_start, probe_duration, reference_segment)
+        extract_wav_segment(source_audio_path, source_start, probe_duration, source_segment)
+        synaudio, combined_output = run_synaudio_measurement(reference_segment, source_segment, probe_strategy, precision_scale)
+        trim_start, trim_end, rate = parse_synaudio_measurement(combined_output)
+        finite_measurement = all(math.isfinite(value) for value in (trim_start, trim_end, rate))
+        results.append(
+            {
+                "anchor": anchor,
+                "reference_start_seconds": reference_start,
+                "source_start_seconds": source_start,
+                "segment_duration_seconds": probe_duration,
+                "trim_start": trim_start,
+                "trim_end": trim_end,
+                "rate": rate,
+                "exit_code": synaudio.returncode,
+                "ok": (
+                    synaudio.returncode == 0
+                    and finite_measurement
+                    and abs(trim_start) <= trim_tolerance
+                    and abs(rate - 1.0) <= rate_tolerance
+                ),
+            }
+        )
+
+    start_padding_seconds = max(0.0, (reference_duration - source_duration) / 2.0)
+    end_padding_seconds = max(0.0, reference_duration - source_duration - start_padding_seconds)
+    return {
+        "verified": all(item["ok"] for item in results),
+        "probe_points": probe_points,
+        "trim_tolerance_seconds": trim_tolerance,
+        "rate_tolerance": rate_tolerance,
+        "results": results,
+        "start_padding_seconds": start_padding_seconds,
+        "end_padding_seconds": end_padding_seconds,
+    }
+
+
 def normalized_stream_language(stream: dict[str, Any]) -> str | None:
     tags = dict(stream.get("tags") or {})
     value = str(tags.get("language") or "").lower()
@@ -263,7 +479,14 @@ def parse_synaudio_measurement(output: str) -> tuple[float, float, float]:
     return float(match.group(1)), float(match.group(2)), float(match.group(3))
 
 
-def sync_filter(trim_start: float, trim_end: float, rate: float, channels: int, config: dict[str, Any]) -> str:
+def sync_filter(
+    trim_start: float,
+    trim_end: float,
+    rate: float,
+    channels: int,
+    config: dict[str, Any],
+    pad_to_duration: float | None = None,
+) -> str:
     rate_tolerance = float(sync_audio_config(config).get("rate_tolerance", 0.0000001))
     parts: list[str] = []
     if trim_start < 0:
@@ -274,9 +497,61 @@ def sync_filter(trim_start: float, trim_end: float, rate: float, channels: int, 
         parts.append("asetpts=PTS-STARTPTS")
     if abs(rate - 1.0) > rate_tolerance:
         parts.append(f"atempo={rate:.15g}")
-    parts.append(f"atrim=0:{trim_end:.9f}")
+    if pad_to_duration is not None:
+        parts.append("apad")
+        parts.append(f"atrim=0:{pad_to_duration:.9f}")
+    else:
+        parts.append(f"atrim=0:{trim_end:.9f}")
     parts.append("asetpts=PTS-STARTPTS")
     return ",".join(parts)
+
+
+def estimate_synced_duration(source_duration: float, trim_start: float, trim_end: float, rate: float) -> float:
+    if rate <= 0:
+        raise RuntimeError(f"Invalid synaudio rate: {rate}")
+    if trim_start < 0:
+        available_duration = source_duration + abs(trim_start)
+    else:
+        available_duration = max(0.0, source_duration - trim_start)
+    adjusted_duration = available_duration / rate
+    return min(trim_end, adjusted_duration)
+
+
+def can_pad_silence(
+    *,
+    settings: dict[str, Any],
+    reference_duration: float,
+    candidate_duration: float,
+) -> bool:
+    if str(settings.get("duration_mismatch_policy", "reject")).lower() != "pad_silence":
+        return False
+    missing_duration = reference_duration - candidate_duration
+    if missing_duration <= 0:
+        return False
+    max_padding = float(settings.get("max_silence_padding_seconds", 0.0))
+    return missing_duration <= max_padding
+
+
+def raise_duration_mismatch(
+    *,
+    phase: str,
+    reference_duration: float,
+    source_duration: float,
+    candidate_duration: float,
+    tolerance: float,
+    reference_audio_path: Path,
+    source_audio_path: Path,
+) -> None:
+    duration_diff = abs(reference_duration - candidate_duration)
+    raise SystemExit(
+        "Audio sync candidate duration mismatch "
+        f"during {phase}: {duration_diff:.6f}s > {tolerance:.6f}s. "
+        f"reference={reference_duration:.6f}s, source={source_duration:.6f}s, "
+        f"candidate={candidate_duration:.6f}s. "
+        "This usually means the extracted dubbing is from a different cut/release "
+        "and should not be muxed into the library file. "
+        f"reference_audio={reference_audio_path}; source_audio={source_audio_path}"
+    )
 
 
 def format_duration(path: Path) -> float:
@@ -354,20 +629,181 @@ def synchronize_track(
 
     sync_root.mkdir(parents=True, exist_ok=True)
     extract_reference_audio(library_video_path, reference_index, reference_audio_path)
-    synaudio = subprocess.run(
-        ["synaudio-cli", str(reference_audio_path), str(source_audio_path)],
-        capture_output=True,
-        text=True,
-        check=False,
+    reference_duration = format_duration(reference_audio_path)
+    source_duration = format_duration(source_audio_path)
+    source_duration_diff = abs(reference_duration - source_duration)
+    metadata.update(
+        {
+            "reference_duration": reference_duration,
+            "source_duration": source_duration,
+            "source_duration_diff": source_duration_diff,
+        }
     )
-    combined_output = "\n".join(part for part in (synaudio.stdout, synaudio.stderr) if part)
+    strategy_choice = choose_sync_strategy(
+        reference_duration=reference_duration,
+        source_duration=source_duration,
+        config=config,
+    )
+    metadata["sync_strategy"] = strategy_choice
+    preflight_tolerance = settings.get("preflight_duration_tolerance_seconds")
+    if preflight_tolerance is not None:
+        preflight_tolerance_float = float(preflight_tolerance)
+        if source_duration_diff > preflight_tolerance_float and not can_pad_silence(
+            settings=settings,
+            reference_duration=reference_duration,
+            candidate_duration=source_duration,
+        ):
+            if (
+                str(strategy_choice.get("method")) == "center_anchored_trimmed_edges"
+                and source_duration < reference_duration
+            ):
+                probe = centered_edge_probe(
+                    reference_audio_path=reference_audio_path,
+                    source_audio_path=source_audio_path,
+                    reference_duration=reference_duration,
+                    source_duration=source_duration,
+                    queue_id=queue_id,
+                    language=language,
+                    config=config,
+                )
+                metadata["center_trimmed_edges_probe"] = probe
+                if probe["verified"]:
+                    channels = int(track.get("channels") or 6)
+                    bitrate = sync_audio_bitrate(channels, config)
+                    filter_value = centered_padding_filter(
+                        probe["start_padding_seconds"],
+                        reference_duration,
+                        channels,
+                    )
+                    subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-hide_banner",
+                            "-i",
+                            str(source_audio_path),
+                            "-filter:a",
+                            filter_value,
+                            "-ar",
+                            "48000",
+                            "-ac",
+                            str(channels),
+                            "-c:a",
+                            str(settings.get("synced_codec", "eac3")),
+                            "-b:a",
+                            bitrate,
+                            str(synced_output_path),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    synced_duration = format_duration(synced_output_path)
+                    metadata.update(
+                        {
+                            "sync_applied": True,
+                            "center_trimmed_edges_applied": True,
+                            "filter": filter_value,
+                            "channels": channels,
+                            "bitrate": bitrate,
+                            "synced_duration": synced_duration,
+                            "duration_diff": abs(reference_duration - synced_duration),
+                        }
+                    )
+                    prepared = dict(track)
+                    prepared["prepared_output_path"] = str(synced_output_path)
+                    prepared["sync_applied"] = True
+                    prepared["mux_input_offset_seconds"] = mux_input_offset
+                    return prepared, metadata
+            raise_duration_mismatch(
+                phase="source preflight",
+                reference_duration=reference_duration,
+                source_duration=source_duration,
+                candidate_duration=source_duration,
+                tolerance=preflight_tolerance_float,
+                reference_audio_path=reference_audio_path,
+                source_audio_path=source_audio_path,
+            )
+
+    try:
+        synaudio, combined_output = run_synaudio_measurement(
+            reference_audio_path,
+            source_audio_path,
+            strategy_choice,
+            float(settings.get("precision_scale", 1.0)),
+        )
+    except FileNotFoundError:
+        if passthrough_on_sync_failure(settings):
+            metadata.update(
+                {
+                    "synaudio_exit_code": None,
+                    "synaudio_warning": (
+                        "synaudio-cli is not available in this runtime image; "
+                        "using source audio as a provisional passthrough track with only the reference mux offset applied"
+                    ),
+                    "sync_applied": False,
+                    "passthrough_on_sync_failure": True,
+                }
+            )
+            prepared = dict(track)
+            prepared["prepared_output_path"] = str(source_audio_path)
+            prepared["sync_applied"] = False
+            prepared["mux_input_offset_seconds"] = mux_input_offset
+            return prepared, metadata
+        raise
+    synaudio_warning = None
+    try:
+        trim_start, trim_end, rate = parse_synaudio_measurement(combined_output)
+    except RuntimeError:
+        if passthrough_on_sync_failure(settings):
+            metadata.update(
+                {
+                    "synaudio_exit_code": synaudio.returncode,
+                    "synaudio_warning": (
+                        "synaudio-cli failed before producing sync measurements; "
+                        "using source audio as a provisional passthrough track with only the reference mux offset applied"
+                    ),
+                    "sync_applied": False,
+                    "passthrough_on_sync_failure": True,
+                }
+            )
+            prepared = dict(track)
+            prepared["prepared_output_path"] = str(source_audio_path)
+            prepared["sync_applied"] = False
+            prepared["mux_input_offset_seconds"] = mux_input_offset
+            return prepared, metadata
+        raise
+    synaudio_warning = None
     if synaudio.returncode != 0:
-        raise RuntimeError(f"synaudio-cli failed with exit code {synaudio.returncode}: {combined_output}")
-    trim_start, trim_end, rate = parse_synaudio_measurement(combined_output)
+        synaudio_warning = (
+            "synaudio-cli returned a non-zero exit code after producing sync measurements; "
+            "continuing with the local ffmpeg remux path"
+        )
 
     channels = int(track.get("channels") or 6)
     bitrate = sync_audio_bitrate(channels, config)
-    filter_value = sync_filter(trim_start, trim_end, rate, channels, config)
+    estimated_duration = estimate_synced_duration(source_duration, trim_start, trim_end, rate)
+    tolerance = float(settings.get("duration_tolerance_seconds", 0.25))
+    pad_to_duration: float | None = None
+    if abs(reference_duration - estimated_duration) > tolerance:
+        if can_pad_silence(
+            settings=settings,
+            reference_duration=reference_duration,
+            candidate_duration=estimated_duration,
+        ):
+            pad_to_duration = reference_duration
+        else:
+            raise_duration_mismatch(
+                phase="sync measurement",
+                reference_duration=reference_duration,
+                source_duration=source_duration,
+                candidate_duration=estimated_duration,
+                tolerance=tolerance,
+                reference_audio_path=reference_audio_path,
+                source_audio_path=source_audio_path,
+            )
+
+    filter_value = sync_filter(trim_start, trim_end, rate, channels, config, pad_to_duration=pad_to_duration)
     subprocess.run(
         [
             "ffmpeg",
@@ -392,13 +828,17 @@ def synchronize_track(
         check=True,
     )
 
-    reference_duration = format_duration(reference_audio_path)
     synced_duration = format_duration(synced_output_path)
     duration_diff = abs(reference_duration - synced_duration)
-    tolerance = float(settings.get("duration_tolerance_seconds", 0.25))
     if duration_diff > tolerance:
-        raise RuntimeError(
-            f"Synchronized audio duration drift is too large: {duration_diff:.6f}s > {tolerance:.6f}s"
+        raise_duration_mismatch(
+            phase="encoded output validation",
+            reference_duration=reference_duration,
+            source_duration=source_duration,
+            candidate_duration=synced_duration,
+            tolerance=tolerance,
+            reference_audio_path=reference_audio_path,
+            source_audio_path=source_audio_path,
         )
 
     metadata.update(
@@ -409,10 +849,13 @@ def synchronize_track(
             "channels": channels,
             "bitrate": bitrate,
             "filter": filter_value,
-            "reference_duration": reference_duration,
+            "estimated_synced_duration": estimated_duration,
             "synced_duration": synced_duration,
             "duration_diff": duration_diff,
             "synaudio_exit_code": synaudio.returncode,
+            "synaudio_warning": synaudio_warning,
+            "silence_padding_applied": pad_to_duration is not None,
+            "silence_padding_seconds": max(0.0, reference_duration - estimated_duration) if pad_to_duration else 0.0,
             "sync_applied": True,
         }
     )
@@ -508,21 +951,26 @@ def build_ffmpeg_command(
         + copied_selected_count
         + compat_selected_count
     )
+    extra_start = total_output_audio - (copied_selected_count + compat_selected_count)
+    compat_start = extra_start + copied_selected_count
     if settings.get("set_preferred_audio_default", True) and total_output_audio > 0:
         for output_audio_index in range(total_output_audio):
             command.extend([f"-disposition:a:{output_audio_index}", "0"])
-        default_index = total_output_audio - (copied_selected_count + compat_selected_count)
-        command.extend([f"-disposition:a:{default_index}", "default"])
+        default_index = 0 if settings.get("include_original_audio", True) else None
+        if compat_selected_count and compat_settings.get("prefer_default", True):
+            default_index = compat_start
+        elif copied_selected_count:
+            default_index = extra_start
+        if default_index is not None:
+            command.extend([f"-disposition:a:{default_index}", "default"])
 
-    extra_start = total_output_audio - (copied_selected_count + compat_selected_count)
     for offset, track in enumerate(copied_tracks):
         language = str(track["language"]).lower()
         ffmpeg_code = LANGUAGE_CODE_MAP.get(language, language)
         output_audio_index = extra_start + offset
         command.extend([f"-metadata:s:a:{output_audio_index}", f"language={ffmpeg_code}"])
-        command.extend([f"-metadata:s:a:{output_audio_index}", f"title={language.upper()} (Assemblarr)"])
+        command.extend([f"-metadata:s:a:{output_audio_index}", f"title={language.upper()} {copied_track_title_suffix(config)}"])
 
-    compat_start = extra_start + copied_selected_count
     for offset, track in enumerate(stereo_tracks):
         language = str(track["language"]).lower()
         ffmpeg_code = LANGUAGE_CODE_MAP.get(language, language)
@@ -544,6 +992,8 @@ def build_ffmpeg_command(
         "compat_stereo_track_paths": [str(track.get("prepared_output_path") or track["output_path"]) for track in stereo_tracks],
         "compat_stereo_codec": str(compat_settings.get("codec", "aac")),
         "compat_stereo_bitrate": str(compat_settings.get("bitrate", "192k")),
+        "copied_track_title_suffix": copied_track_title_suffix(config),
+        "compat_stereo_prefer_default": bool(compat_settings.get("prefer_default", True)),
     }
     return command, plan
 

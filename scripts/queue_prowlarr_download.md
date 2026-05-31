@@ -17,6 +17,7 @@ Selects the best configured Prowlarr candidate for one missing-language target a
 - When `download_clients.enabled` is true and `preferred` is `qbittorrent`, it also submits the staged artifact to qBittorrent.
 - The staging workspace can be the managed library workspace or a dedicated subdirectory under `DOWNLOAD_ROOT`.
 - When no acceptable candidate exists yet, it records the title into `rss_waitlist` for later RSS-driven retry logic.
+- It can also target `rss_waitlist` directly for retry runs instead of only scanning current missing-language items.
 
 ## Inputs
 
@@ -30,6 +31,8 @@ Selects the best configured Prowlarr candidate for one missing-language target a
   - `download_clients`
   - `library_checks.missing_language`
   - `prowlarr_search`
+- CLI
+  - `--target-source missing_language|rss_waitlist`
 - Postgres library tables.
 - Prowlarr search results.
 
@@ -47,4 +50,5 @@ Selects the best configured Prowlarr candidate for one missing-language target a
 python3 scripts/queue_prowlarr_download.py
 python3 scripts/queue_prowlarr_download.py --apply
 python3 scripts/queue_prowlarr_download.py --max-targets 50
+python3 scripts/queue_prowlarr_download.py --target-source rss_waitlist --max-targets 25 --apply
 ```

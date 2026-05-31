@@ -51,6 +51,11 @@ Dalsi potrebny postup:
 - pri Sonarr dabingu rozhodnut politiku pre mixed series: tagovat seriu podla vsetkych epizod, iba kompletne serie, alebo drzat len file-level DB stav
 - doplnit inkrementalnu synchronizaciu cez history/eventy
 - pridat kontrolny SQL/report pre pocty filmov, serialov a suborov
+- pri library audio remuxe povazovat vlozene Assemblarr audio za provizorne a mat to priamo v nazve audio stopy
+- pri dalsom queue rune pre ten isty film preskocit uz skuseny release a skusit iny
+- pri dalsom release zachovat kontrolu dlzky extrahovaneho audia oproti aktualnej kniznicnej verzii este pred remuxom
+- na teraz preferovat rychlejsi sync pre viac filmov aj za cenu nizsej presnosti (`precision_scale` nizsie)
+- pri prehravacich problemoch preferovat AAC stereo kompat stopu ako default, kym sa neodladi hlavna synced stopa
 
 
 2. triedenie podla nazvu 

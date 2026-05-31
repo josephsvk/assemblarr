@@ -123,11 +123,20 @@ docker compose -f "docker compose.yml" build
 docker compose -f "docker compose.yml" up -d
 ```
 
+The default runtime image intentionally stays light and does not include `synaudio-cli`. If you need the manual library-remux workflow from `scripts/remux_library_video_with_download_audio.py`, build the separate `audio-tools` target from `Dockerfile` first.
+
 Long-running worker service:
 
 ```bash
 docker compose -f "docker compose.yml" up -d assemblarr-worker
 docker compose -f "docker compose.yml" logs -f assemblarr-worker
+```
+
+Parallel orchestrator service:
+
+```bash
+docker compose -f "docker compose.yml" up -d assemblarr-orchestrator
+docker compose -f "docker compose.yml" logs -f assemblarr-orchestrator
 ```
 
 One-shot background audio-backup service:
@@ -162,6 +171,8 @@ docker compose -f "docker compose.yml" run --rm assemblarr python scripts/sync_l
 docker compose -f "docker compose.yml" run --rm assemblarr python scripts/sync_library.py --source sonarr
 docker compose -f "docker compose.yml" run --rm assemblarr python scripts/run_download_worker.py --once --no-fill-queue
 docker compose -f "docker compose.yml" run --rm assemblarr python scripts/run_download_worker.py
+docker compose -f "docker compose.yml" run --rm assemblarr python scripts/queue_prowlarr_download.py --target-source rss_waitlist --max-targets 25 --apply
+docker compose -f "docker compose.yml" run --rm assemblarr-orchestrator python scripts/run_pipeline_orchestrator.py --once
 ```
 
 The `POSTGRES_DSN` inside Docker is overridden to use the `postgres` service hostname automatically, so `.env` can keep the localhost DSN for local non-container runs.
@@ -195,6 +206,41 @@ It currently:
 - keeps downloaded files on disk
 
 It does not yet extract archives or import the selected media into the final library.
+
+## Pipeline Orchestrator
+
+`assemblarr-orchestrator` is the new top-level service for parallel background work. It uses the heavier `audio-tools` image so the remux branch can run real `synaudio-cli` sync instead of fallback passthrough.
+
+It runs four loops in parallel:
+
+- `missing_search`: searches desired or missing titles and queues new releases while free torrent slots exist
+- `rss_waitlist`: retries titles stored in `rss_waitlist`
+- `download_sync_extract`: syncs qBittorrent state, scans completed downloads, and extracts CZ/SK audio
+- `library_audio_remux`: takes `audio_extracted` jobs and runs the library-audio sync/remux step
+
+Recommended default service:
+
+```bash
+docker compose -f "docker compose.yml" up -d assemblarr-orchestrator
+```
+
+Worker-only mode still exists, but the orchestrator is the preferred path when you want search, retry, extraction, and remux to keep moving automatically.
+
+Main knobs:
+
+```yaml
+pipeline_orchestrator:
+  missing_search:
+    interval_seconds: 180
+    max_queue_additions_per_run: 2
+  rss_waitlist:
+    interval_seconds: 300
+  download_sync_extract:
+    interval_seconds: 60
+  library_audio_remux:
+    interval_seconds: 120
+    max_per_run: 1
+```
 
 Initialize and sync:
 
@@ -298,9 +344,12 @@ python3 scripts/remux_and_import_radarr_movie.py
 python3 scripts/remux_and_import_radarr_movie.py --download-job-id 4 --apply
 python3 scripts/remux_library_video_with_download_audio.py --download-job-id 28
 python3 scripts/remux_library_video_with_download_audio.py --download-job-id 28 --apply
+python3 scripts/health_check_library_audio_remux.py --download-job-id 33
 ```
 
 The library-audio remux keeps the existing library video master, appends preferred CZ/SK audio when found, and can also generate an extra AAC stereo compatibility track for weaker playback devices.
+
+Inserted Assemblarr audio is currently treated as provisional. Injected track titles are labeled as possibly incorrect or incomplete, and the AAC stereo compatibility track is preferred as the default playback track.
 
 Use `find_audio_sync_test_candidate.py` on the media server to find a small Radarr movie file that has extracted CZ/SK audio on disk. It prints the matching `remux_library_video_with_download_audio.py` dry-run and apply commands.
 
@@ -315,9 +364,39 @@ Timing fix and compatibility audio are configurable in `config.yml`:
 ```yaml
 postprocess_import:
   library_audio_remux:
+    track_title_suffix: (Assemblarr - possibly incorrect or incomplete)
     sync_audio:
       enabled: true
       reference_audio_stream_index:
+      precision_scale: 0.25
+      strategy:
+        method: adaptive_anchor_sync
+        single_anchor_max_duration_diff_seconds: 4.0
+        prefer_silence_windows: true
+        silence_window_status: planned
+        center_trimmed_edges_probe:
+          segment_duration_seconds: 45.0
+          anchor_points: [0.5, 0.75]
+          trim_tolerance_seconds: 2.0
+          rate_tolerance: 0.002
+          sample_length: 0.5
+          sample_gap: 9999.0
+          start_range: 12.0
+          end_range: 12.0
+        profiles:
+          single_anchor:
+            sample_length: 0.25
+            sample_gap: 90.0
+            start_range: 240.0
+            end_range: 120.0
+          multi_anchor:
+            sample_length: 0.125
+            sample_gap: 10.0
+            start_range: 180.0
+            end_range: 60.0
+      preflight_duration_tolerance_seconds: 12.0
+      duration_mismatch_policy: reject
+      max_silence_padding_seconds: 0.0
       synced_codec: eac3
       synced_bitrate_2ch: 384k
       synced_bitrate_multichannel: 640k
@@ -329,13 +408,27 @@ postprocess_import:
       codec: aac
       bitrate: 192k
       channels: 2
+      prefer_default: true
+      title_suffix: Stereo (Assemblarr - possibly incorrect or incomplete)
 ```
 
 - `reference_audio_stream_index`: optional explicit library audio stream index used as the sync reference.
+- `track_title_suffix`: appended to injected CZ/SK track titles so the file clearly shows that the dubbing may still be incorrect or incomplete.
+- `precision_scale`: multiplier for `synaudio-cli` correlation sample size; lower values are faster but less precise. `0.25` is the current faster setting to push through more films at the cost of weaker sync confidence.
+- current conservative mode: keep only near-matching audio candidates, allow at most `12s` preflight length drift, and reject the rest so a later queue run fetches another release.
+- `strategy.method: center_anchored_trimmed_edges`: experimental test mode for releases that may be shortened at the beginning and end. It probes the middle and 3/4 positions first; if both align, the shorter track is centered by padding the start and end.
+- `strategy.method: adaptive_anchor_sync`: named sync method for testing. When the extracted audio is almost as long as the library reference, it uses a sparse single-anchor profile; when the durations diverge more, it switches to a denser multi-anchor profile.
+- `strategy.single_anchor_max_duration_diff_seconds`: threshold for switching from `single_anchor` to `multi_anchor`.
+- `strategy.prefer_silence_windows`: reserved switch for future silence-aware anchor placement. It is prepared in config/metadata, but not yet executed in the current sync implementation.
+- `preflight_duration_tolerance_seconds`: rejects obviously mismatched audio before the expensive sync pass.
+- `duration_mismatch_policy: reject`: current default for throughput. When the measured candidate still does not fit, Assemblarr stops that remux and relies on a later queue run to fetch another release.
+- `max_silence_padding_seconds`: used only when `duration_mismatch_policy` is switched back to `pad_silence` for experimental recovery flows.
 - `duration_tolerance_seconds`: maximum allowed length drift after sync.
 - `synced_bitrate_2ch` and `synced_bitrate_multichannel`: target bitrate for the synchronized dubbing master.
 - synchronized tracks keep the same audio-vs-video timestamp offset as the selected reference audio stream when they are muxed back into the library file.
 - `compat_stereo`: creates a lightweight playback-friendly track after sync, so the stereo version is derived from the corrected timing and not from the unsynchronized source.
+- `compat_stereo.prefer_default`: makes the AAC stereo compatibility track the default output audio, which is safer on weaker playback devices when the higher-quality synced track behaves badly.
+- repeated `queue_prowlarr_download.py` runs now skip already attempted releases for the same target, so the next run is biased toward a different release; after download, the remux preflight still compares extracted audio length against the current library reference before muxing.
 
 Library-audio backup by tag is configurable here:
 
