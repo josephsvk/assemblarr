@@ -1092,6 +1092,39 @@ def update_download_job(conn: Any, job_id: int, status: str, metadata: dict[str,
     )
 
 
+def record_missing_library_video_job(
+    conn: Any,
+    *,
+    job: dict[str, Any],
+    library_video_path: Path,
+    dry_run: bool,
+) -> dict[str, Any]:
+    metadata = {
+        "error": "library_video_missing",
+        "library_video_path": str(library_video_path),
+    }
+    temp_output = library_video_path.with_name(f"{library_video_path.name}.assemblarr-temp")
+    upsert_remux_job(
+        conn,
+        job=job,
+        temp_output=temp_output,
+        final_library_path=None,
+        remux_status="library_video_missing",
+        metadata=metadata,
+        dry_run=dry_run,
+    )
+    update_download_job(
+        conn,
+        int(job["id"]),
+        "library_audio_missing_library_path",
+        {"library_audio_remux": metadata},
+        dry_run=dry_run,
+    )
+    if not dry_run:
+        conn.commit()
+    return metadata
+
+
 def main() -> int:
     args = parse_args()
     dry_run = not args.apply
@@ -1107,7 +1140,20 @@ def main() -> int:
         job = choose_job(conn, args.download_job_id)
         library_video_path = Path(str(job["library_video_path"]))
         if not library_video_path.exists():
-            raise SystemExit(f"Library video path does not exist: {library_video_path}")
+            missing_library_metadata = record_missing_library_video_job(
+                conn,
+                job=job,
+                library_video_path=library_video_path,
+                dry_run=dry_run,
+            )
+            print("Library video + download audio remux")
+            print(f"dry_run: {dry_run}")
+            print(f"download_job_id: {job['id']}")
+            print(f"title: {job['title']}")
+            print(f"library_video_path: {library_video_path}")
+            print("note: skipped stale remux job because the current library video path does not exist")
+            print("error: " + str(missing_library_metadata["error"]))
+            return 0
 
         selected_tracks = select_preferred_tracks(job, config)
         temp_output = temp_output_path(library_video_path, config)

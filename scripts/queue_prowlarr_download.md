@@ -41,8 +41,18 @@ Selects the best configured Prowlarr candidate for one missing-language target a
 - Optional file in the configured staging `incoming` folder.
 - Optional row in `download_jobs`.
 - Optional row in `rss_waitlist` when no acceptable candidate exists yet.
+- Persistent rows in `search_candidate_events` for selected, skipped, and no-candidate search outcomes.
 - Optional qBittorrent queue submission.
 - Console report with target, release, score, size, staging root, client status, and staging free space.
+
+## Stored Search History
+
+- `download_jobs.metadata` now keeps the selected release plus the search context used to pick it.
+- `rss_waitlist.metadata` now keeps broader diagnostics about why a title still has no acceptable candidate.
+- `search_candidate_events` stores append-only search events so you can review:
+  - targets skipped because an open download job already exists
+  - targets that had no acceptable candidate
+  - the selected release and the queue status when a candidate was accepted
 
 ## Example
 

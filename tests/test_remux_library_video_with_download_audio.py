@@ -295,3 +295,33 @@ def test_parse_synaudio_measurement_accepts_nan_tokens():
     assert math.isnan(trim_start)
     assert trim_end == 45.0
     assert math.isnan(rate)
+
+
+def test_record_missing_library_video_job_marks_download_as_skipped(monkeypatch, tmp_path):
+    calls = {"upsert": None, "update": None, "committed": False}
+
+    def fake_upsert(conn, **kwargs):
+        calls["upsert"] = kwargs
+
+    def fake_update(conn, job_id, status, metadata, dry_run):
+        calls["update"] = {"job_id": job_id, "status": status, "metadata": metadata, "dry_run": dry_run}
+
+    class FakeConn:
+        def commit(self):
+            calls["committed"] = True
+
+    monkeypatch.setattr(remux, "upsert_remux_job", fake_upsert)
+    monkeypatch.setattr(remux, "update_download_job", fake_update)
+
+    job = {"id": 44, "source": "radarr", "source_id": 55, "movie_id": 66, "library_video_path": str(tmp_path / "missing.mkv")}
+    metadata = remux.record_missing_library_video_job(
+        FakeConn(),
+        job=job,
+        library_video_path=tmp_path / "missing.mkv",
+        dry_run=False,
+    )
+
+    assert metadata["error"] == "library_video_missing"
+    assert calls["upsert"]["remux_status"] == "library_video_missing"
+    assert calls["update"]["status"] == "library_audio_missing_library_path"
+    assert calls["committed"] is True

@@ -218,6 +218,65 @@ It runs four loops in parallel:
 - `download_sync_extract`: syncs qBittorrent state, scans completed downloads, and extracts CZ/SK audio
 - `library_audio_remux`: takes `audio_extracted` jobs and runs the library-audio sync/remux step
 
+Search/retry history is now persisted in Postgres as well:
+
+- `download_jobs.metadata` keeps the chosen release plus search context
+- `rss_waitlist.metadata` keeps the latest wider no-candidate diagnostics
+- `search_candidate_events` is an append-only audit trail for skipped targets, no-candidate outcomes, selected releases, and queue insertions
+
+Useful SQL snippets for quick review:
+
+```sql
+-- 1) Latest candidate/search timeline for one title
+SELECT
+  created_at,
+  event_type,
+  reason,
+  target_source,
+  release_title,
+  indexer,
+  score,
+  peers
+FROM search_candidate_events
+WHERE title ILIKE '%A Simple Favor%'
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+```sql
+-- 2) Latest no-candidate outcomes with condensed diagnostics
+SELECT
+  created_at,
+  title,
+  reason,
+  metadata->'diagnostics'->>'total_releases' AS total_releases,
+  metadata->'diagnostics'->>'language_rejected' AS language_rejected,
+  metadata->'diagnostics'->>'reject_token_rejected' AS reject_token_rejected,
+  metadata->'diagnostics'->>'peer_rejected' AS peer_rejected,
+  metadata->'filter_diagnostics'->>'already_recorded' AS already_recorded,
+  metadata->'filter_diagnostics'->>'previously_attempted' AS previously_attempted
+FROM search_candidate_events
+WHERE event_type = 'no_candidate'
+ORDER BY created_at DESC
+LIMIT 100;
+```
+
+```sql
+-- 3) Last selected + queued release per title
+SELECT DISTINCT ON (title)
+  created_at,
+  title,
+  event_type,
+  release_title,
+  indexer,
+  score,
+  peers,
+  reason
+FROM search_candidate_events
+WHERE event_type IN ('candidate_selected', 'candidate_queued')
+ORDER BY title, created_at DESC;
+```
+
 Recommended default service:
 
 ```bash

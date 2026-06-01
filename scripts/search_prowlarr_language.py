@@ -60,6 +60,26 @@ def release_text(release: dict[str, Any]) -> str:
     return " ".join(str(value or "") for value in (release.get("title"), release.get("fileName")))
 
 
+def release_summary(release: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "title": release.get("title") or release.get("fileName") or "",
+        "guid": release.get("guid") or "",
+        "indexer": release.get("indexer") or "",
+        "protocol": release_protocol(release) or ("torrent" if is_torrent_release(release) else ""),
+        "peers": release_peers(release),
+        "seeders": to_int(release.get("seeders")),
+        "size": int(release.get("size") or 0),
+        "info_url": release.get("infoUrl") or "",
+        "download_url_present": bool(release.get("downloadUrl") or release.get("magnetUrl")),
+    }
+
+
+def append_sample(diagnostics: dict[str, Any], key: str, value: dict[str, Any], *, limit: int = 5) -> None:
+    bucket = diagnostics.setdefault(key, [])
+    if isinstance(bucket, list) and len(bucket) < limit:
+        bucket.append(value)
+
+
 def score_named_tokens(text: str, scores: dict[str, int]) -> tuple[int, list[str]]:
     total = 0
     matched = []
@@ -153,7 +173,7 @@ def score_release(release: dict[str, Any], search_config: dict[str, Any]) -> dic
     }
 
 
-def search_movie_diagnostics(row: dict[str, Any], search_config: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def search_movie_diagnostics(row: dict[str, Any], search_config: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     query = f"{row['title']} {row['year']}".strip()
     params: dict[str, Any] = {
         "query": query,
@@ -175,6 +195,11 @@ def search_movie_diagnostics(row: dict[str, Any], search_config: dict[str, Any])
     reject_tokens = [str(token) for token in search_config.get("scoring", {}).get("reject_tokens", [])]
     min_peers = int(search_config.get("availability", {}).get("min_peers", 0))
     diagnostics = {
+        "query": query,
+        "categories": params.get("categories", []),
+        "required_tokens": required_tokens,
+        "reject_tokens": reject_tokens,
+        "min_peers": min_peers,
         "total_releases": len(releases),
         "language_rejected": 0,
         "reject_token_rejected": 0,
@@ -186,17 +211,35 @@ def search_movie_diagnostics(row: dict[str, Any], search_config: dict[str, Any])
         text = release_text(release)
         if not token_pattern(required_tokens).search(text):
             diagnostics["language_rejected"] += 1
+            append_sample(diagnostics, "language_rejected_examples", release_summary(release))
             continue
         if reject_tokens and token_pattern(reject_tokens).search(text):
             diagnostics["reject_token_rejected"] += 1
+            append_sample(diagnostics, "reject_token_rejected_examples", release_summary(release))
             continue
         if min_peers and is_torrent_release(release) and release_peers(release) < min_peers:
             diagnostics["peer_rejected"] += 1
+            sample = release_summary(release)
+            sample["required_min_peers"] = min_peers
+            append_sample(diagnostics, "peer_rejected_examples", sample)
             continue
         item = score_release(release, search_config)
         if item is not None:
             scored.append(item)
             diagnostics["accepted"] += 1
+            append_sample(
+                diagnostics,
+                "accepted_examples",
+                {
+                    "title": item.get("title"),
+                    "guid": item.get("guid"),
+                    "indexer": item.get("indexer"),
+                    "score": item.get("score"),
+                    "peers": item.get("peers"),
+                    "size_gb": item.get("size_gb"),
+                    "reasons": item.get("reasons", []),
+                },
+            )
 
     return sorted(scored, key=lambda item: (item["score"], item["seeders"], item["peers"], item["size_gb"]), reverse=True), diagnostics
 

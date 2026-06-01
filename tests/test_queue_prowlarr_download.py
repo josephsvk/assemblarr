@@ -71,3 +71,39 @@ def test_fetch_search_targets_can_read_rss_waitlist():
     targets = queue.fetch_search_targets(conn, {"library_checks": {"missing_language": {}}}, "rss_waitlist", 10)
 
     assert targets == [{"source": "radarr", "media_type": "movie_file", "source_id": 42, "title": "Movie", "year": 2024, "metadata": {}}]
+
+
+def test_build_filter_diagnostics_counts_db_filtered_candidates():
+    conn = FakeConn([{"exists": 1}, None, {"exists": 1}])
+    target = {"source": "radarr", "media_type": "movie_file", "source_id": 42}
+    candidates = [
+        {"guid": "existing", "title": "Existing Release", "score": 100, "peers": 5},
+        {"guid": "new-guid", "title": "Old Attempt", "score": 90, "peers": 4},
+    ]
+
+    filtered, diagnostics = queue.build_filter_diagnostics(conn, target, candidates)
+
+    assert filtered == []
+    assert diagnostics["already_recorded"] == 1
+    assert diagnostics["previously_attempted"] == 1
+    assert diagnostics["accepted_candidates_before_db_filters"] == 2
+    assert diagnostics["accepted_candidates_after_db_filters"] == 0
+
+
+def test_build_search_context_keeps_top_candidate_summaries():
+    candidates = [
+        {"guid": "a", "title": "Release A", "indexer": "SkTorrent", "score": 100, "peers": 5, "seeders": 3, "protocol": "torrent", "size_gb": 4.2},
+        {"guid": "b", "title": "Release B", "indexer": "SkTorrent", "score": 90, "peers": 4, "seeders": 2, "protocol": "torrent", "size_gb": 4.0},
+    ]
+
+    context = queue.build_search_context(
+        target_source="missing_language",
+        diagnostics={"accepted": 2},
+        filter_diagnostics={"accepted_candidates_after_db_filters": 2},
+        candidates=candidates,
+    )
+
+    assert context["target_source"] == "missing_language"
+    assert context["diagnostics"]["accepted"] == 2
+    assert len(context["top_candidate_summaries"]) == 2
+    assert context["top_candidate_summaries"][0]["title"] == "Release A"

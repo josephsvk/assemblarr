@@ -64,6 +64,28 @@ CREATE TABLE IF NOT EXISTS rss_waitlist (
   UNIQUE(source, media_type, source_id)
 )
 """
+SEARCH_CANDIDATE_EVENTS_SQL = """
+CREATE TABLE IF NOT EXISTS search_candidate_events (
+  id BIGSERIAL PRIMARY KEY,
+  target_source TEXT NOT NULL,
+  source TEXT NOT NULL,
+  media_type TEXT NOT NULL,
+  source_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  year INTEGER,
+  event_type TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  release_title TEXT,
+  release_guid TEXT,
+  indexer TEXT,
+  indexer_id INTEGER,
+  score INTEGER,
+  peers INTEGER,
+  size_gb DOUBLE PRECISION,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT now()
+)
+"""
 OPEN_DOWNLOAD_JOB_STATUSES = (
     "artifact_saved",
     "client_pending",
@@ -509,9 +531,126 @@ def insert_job(
             "staging_path": str(staging_path) if staging_path else None,
             "client": client,
             "client_queue_id": client_queue_id,
-            "metadata": Jsonb({"candidate": candidate, "target": target}),
+            "metadata": Jsonb(metadata_with_search_context(target, candidate, {"candidate": candidate, "target": target})),
         },
     )
+
+
+def summarize_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "title": candidate.get("title") or "",
+        "guid": candidate.get("guid") or "",
+        "indexer": candidate.get("indexer") or "",
+        "indexer_id": candidate.get("indexer_id"),
+        "score": candidate.get("score"),
+        "peers": candidate.get("peers"),
+        "seeders": candidate.get("seeders"),
+        "protocol": candidate.get("protocol") or "",
+        "size_gb": candidate.get("size_gb"),
+        "reasons": list(candidate.get("reasons") or []),
+        "download_url_present": bool(candidate.get("download_url_present")),
+    }
+
+
+def metadata_with_search_context(target: dict[str, Any], candidate: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(metadata)
+    prior = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
+    if prior:
+        enriched["search_context"] = prior
+    enriched.setdefault("candidate_summary", summarize_candidate(candidate))
+    return enriched
+
+
+def build_filter_diagnostics(
+    conn: Any,
+    target: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    filtered_candidates = []
+    diagnostics: dict[str, Any] = {
+        "accepted_candidates_before_db_filters": len(candidates),
+        "already_recorded": 0,
+        "previously_attempted": 0,
+        "already_recorded_examples": [],
+        "previously_attempted_examples": [],
+    }
+    for candidate in candidates:
+        summary = summarize_candidate(candidate)
+        if candidate_already_recorded(conn, target, candidate):
+            diagnostics["already_recorded"] += 1
+            if len(diagnostics["already_recorded_examples"]) < 5:
+                diagnostics["already_recorded_examples"].append(summary)
+            continue
+        if candidate_previously_attempted(conn, target, candidate):
+            diagnostics["previously_attempted"] += 1
+            if len(diagnostics["previously_attempted_examples"]) < 5:
+                diagnostics["previously_attempted_examples"].append(summary)
+            continue
+        filtered_candidates.append(candidate)
+    diagnostics["accepted_candidates_after_db_filters"] = len(filtered_candidates)
+    diagnostics["accepted_candidate_examples"] = [summarize_candidate(item) for item in filtered_candidates[:5]]
+    return filtered_candidates, diagnostics
+
+
+def record_search_event(
+    conn: Any,
+    *,
+    target_source: str,
+    target: dict[str, Any],
+    event_type: str,
+    reason: str,
+    metadata: dict[str, Any],
+    candidate: dict[str, Any] | None,
+    dry_run: bool,
+) -> None:
+    if dry_run:
+        return
+    release = candidate or {}
+    conn.execute(
+        """
+        INSERT INTO search_candidate_events (
+            target_source, source, media_type, source_id, title, year, event_type, reason,
+            release_title, release_guid, indexer, indexer_id, score, peers, size_gb, metadata
+        )
+        VALUES (
+            %(target_source)s, %(source)s, %(media_type)s, %(source_id)s, %(title)s, %(year)s, %(event_type)s, %(reason)s,
+            %(release_title)s, %(release_guid)s, %(indexer)s, %(indexer_id)s, %(score)s, %(peers)s, %(size_gb)s, %(metadata)s
+        )
+        """,
+        {
+            "target_source": target_source,
+            "source": target["source"],
+            "media_type": target["media_type"],
+            "source_id": target["source_id"],
+            "title": target.get("title") or "unknown",
+            "year": target.get("year"),
+            "event_type": event_type,
+            "reason": reason,
+            "release_title": release.get("title"),
+            "release_guid": release.get("guid"),
+            "indexer": release.get("indexer"),
+            "indexer_id": release.get("indexer_id"),
+            "score": release.get("score"),
+            "peers": release.get("peers"),
+            "size_gb": release.get("size_gb"),
+            "metadata": Jsonb(metadata),
+        },
+    )
+
+
+def build_search_context(
+    *,
+    target_source: str,
+    diagnostics: dict[str, Any],
+    filter_diagnostics: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "target_source": target_source,
+        "diagnostics": diagnostics,
+        "filter_diagnostics": filter_diagnostics,
+        "top_candidate_summaries": [summarize_candidate(item) for item in candidates[:5]],
+    }
 
 
 def upsert_rss_waitlist(
@@ -730,6 +869,7 @@ def main() -> int:
         conn.row_factory = dict_row
         conn.execute(DOWNLOAD_TABLE_SQL)
         conn.execute(RSS_WAITLIST_SQL)
+        conn.execute(SEARCH_CANDIDATE_EVENTS_SQL)
         targets = fetch_search_targets(conn, config, args.target_source, args.max_targets)
         if not targets:
             if args.target_source == "rss_waitlist":
@@ -741,44 +881,86 @@ def main() -> int:
         target = None
         candidate = None
         skipped = []
-        candidate_diagnostics: dict[str, int] | None = None
+        candidate_diagnostics: dict[str, Any] | None = None
         for possible_target in targets:
             if target_has_open_download_job(conn, possible_target):
                 skipped.append(f"{possible_target.get('title')} ({possible_target.get('year')})")
+                record_search_event(
+                    conn,
+                    target_source=args.target_source,
+                    target=possible_target,
+                    event_type="target_skipped_open_job",
+                    reason="target already has an open download job",
+                    metadata={"open_download_statuses": list(OPEN_DOWNLOAD_JOB_STATUSES)},
+                    candidate=None,
+                    dry_run=dry_run,
+                )
                 continue
             candidates, diagnostics = search_movie_diagnostics(possible_target, config["prowlarr_search"])
-            if candidates:
-                filtered_candidates = [
-                    item
-                    for item in candidates
-                    if not candidate_already_recorded(conn, possible_target, item)
-                    and not candidate_previously_attempted(conn, possible_target, item)
-                ]
-            else:
-                filtered_candidates = []
+            filtered_candidates, filter_diagnostics = build_filter_diagnostics(conn, possible_target, candidates)
+            search_context = build_search_context(
+                target_source=args.target_source,
+                diagnostics=diagnostics,
+                filter_diagnostics=filter_diagnostics,
+                candidates=candidates,
+            )
+            possible_target = dict(possible_target)
+            possible_target["metadata"] = search_context
             if filtered_candidates:
                 target = possible_target
                 candidate = filtered_candidates[0]
                 candidate_diagnostics = diagnostics
+                record_search_event(
+                    conn,
+                    target_source=args.target_source,
+                    target=possible_target,
+                    event_type="candidate_selected",
+                    reason="selected highest-ranked candidate after Prowlarr and DB filters",
+                    metadata=search_context,
+                    candidate=candidate,
+                    dry_run=dry_run,
+                )
                 break
             skipped.append(f"{possible_target.get('title')} ({possible_target.get('year')})")
             if diagnostics["peer_rejected"] > 0:
+                reason = "all matching torrent releases were below the configured minimum peers"
                 upsert_rss_waitlist(
                     conn,
                     possible_target,
                     "waiting_for_rss",
-                    "all matching torrent releases were below the configured minimum peers",
-                    diagnostics,
+                    reason,
+                    search_context,
                     dry_run,
                 )
+                record_search_event(
+                    conn,
+                    target_source=args.target_source,
+                    target=possible_target,
+                    event_type="no_candidate",
+                    reason=reason,
+                    metadata=search_context,
+                    candidate=None,
+                    dry_run=dry_run,
+                )
             else:
+                reason = "no acceptable Prowlarr candidate found yet"
                 upsert_rss_waitlist(
                     conn,
                     possible_target,
                     "waiting_for_rss",
-                    "no acceptable Prowlarr candidate found yet",
-                    diagnostics,
+                    reason,
+                    search_context,
                     dry_run,
+                )
+                record_search_event(
+                    conn,
+                    target_source=args.target_source,
+                    target=possible_target,
+                    event_type="no_candidate",
+                    reason=reason,
+                    metadata=search_context,
+                    candidate=None,
+                    dry_run=dry_run,
                 )
 
         if target is None or candidate is None:
@@ -809,9 +991,26 @@ def main() -> int:
                     "indexer": candidate.get("indexer"),
                     "client_queue_id": client_queue_id,
                     "job_status": status,
+                    "search_context": target.get("metadata", {}),
                 },
                 dry_run=dry_run,
             )
+        record_search_event(
+            conn,
+            target_source=args.target_source,
+            target=target,
+            event_type="candidate_queued" if args.apply else "candidate_dry_run",
+            reason="candidate inserted into download_jobs",
+            metadata={
+                "job_status": status,
+                "client": client_name,
+                "client_queue_id": client_queue_id,
+                "staging_path": str(staging_path) if staging_path else None,
+                "search_context": target.get("metadata", {}),
+            },
+            candidate=candidate,
+            dry_run=dry_run,
+        )
         if args.apply:
             conn.commit()
 

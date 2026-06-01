@@ -101,6 +101,27 @@ CREATE TABLE IF NOT EXISTS rss_waitlist (
   UNIQUE(source, media_type, source_id)
 );
 
+CREATE TABLE IF NOT EXISTS search_candidate_events (
+  id BIGSERIAL PRIMARY KEY,
+  target_source TEXT NOT NULL,
+  source TEXT NOT NULL,
+  media_type TEXT NOT NULL,
+  source_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  year INTEGER,
+  event_type TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  release_title TEXT,
+  release_guid TEXT,
+  indexer TEXT,
+  indexer_id INTEGER,
+  score INTEGER,
+  peers INTEGER,
+  size_gb DOUBLE PRECISION,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS download_artifact_scans (
   id BIGSERIAL PRIMARY KEY,
   download_job_id BIGINT REFERENCES download_jobs(id) ON DELETE SET NULL,
